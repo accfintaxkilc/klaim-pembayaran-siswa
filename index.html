@@ -647,26 +647,82 @@ function doPost(e) {
           }
         }
 
+        function formatPeriodeValue(rawPeriode) {
+          const str = String(rawPeriode ?? '').trim();
+          if (!str) return '';
+          if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(str)) {
+            const parsed = new Date(str);
+            if (!Number.isNaN(parsed.getTime())) {
+              return new Intl.DateTimeFormat('id-ID', {
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                timeZone: 'Asia/Jakarta',
+              }).format(parsed);
+            }
+          }
+          return str;
+        }
+
         function normalizeClaimRecord(raw) {
           if (!raw || typeof raw !== 'object') return raw;
-          const ticket = String(raw.ticketId || raw.ticketNumber || raw.id || '');
+
+          const looseMap = new Map();
+          for (const [k, v] of Object.entries(raw)) {
+            const clean = String(k).toLowerCase().replace(/[^a-z0-9]/g, '');
+            if (clean && !looseMap.has(clean)) {
+              looseMap.set(clean, v);
+            }
+          }
+          const pick = (...keys) => {
+            for (const key of keys) {
+              const clean = String(key).toLowerCase().replace(/[^a-z0-9]/g, '');
+              if (looseMap.has(clean)) {
+                const val = looseMap.get(clean);
+                if (val !== undefined && val !== null && String(val).trim() !== '') {
+                  return val;
+                }
+              }
+            }
+            return undefined;
+          };
+
+          const ticket = String(
+            pick('ticketId', 'ticketNumber', 'tiket', 'notiket', 'nomortiket', 'id') ?? '',
+          );
+
+          const directProofUrl = pick(
+            'fileUrl',
+            'buktiUrl',
+            'proofUrl',
+            'linkBukti',
+            'fileLink',
+            'driveUrl',
+            'buktiPembayaranSebelumnya',
+            'buktiTransferSebelumnya',
+            'buktiTransfer',
+            'buktiPembayaran',
+            'bukti',
+            'url',
+          );
+          const fallbackDriveUrl =
+            directProofUrl ||
+            Object.values(raw).find(
+              (v) => typeof v === 'string' && /^https:\/\/(drive|docs)\.google\.com\//i.test(v),
+            ) ||
+            '';
           const initialProofUrl =
             (raw.buktiTransferSebelumnya &&
               (raw.buktiTransferSebelumnya.remoteUrl || raw.buktiTransferSebelumnya.dataUrl)) ||
-            raw.fileUrl ||
-            raw.buktiUrl ||
-            raw.proofUrl ||
-            raw.linkBukti ||
-            raw.url ||
-            '';
+            String(fallbackDriveUrl || '');
           const initialProof =
             raw.buktiTransferSebelumnya && typeof raw.buktiTransferSebelumnya === 'object'
               ? raw.buktiTransferSebelumnya
               : initialProofUrl
                 ? {
-                    name: String(raw.fileName || 'bukti-transfer'),
-                    mimeType: String(raw.mimeType || 'image/png'),
-                    size: Number(raw.fileSize) || 0,
+                    name: String(pick('fileName', 'namaFile') || 'bukti-transfer'),
+                    mimeType: String(pick('mimeType') || 'image/png'),
+                    size: Number(pick('fileSize')) || 0,
                     dataUrl: String(initialProofUrl),
                     remoteUrl: String(initialProofUrl),
                   }
@@ -675,23 +731,21 @@ function doPost(e) {
           const refundUrl =
             (raw.buktiTransferPengembalian &&
               (raw.buktiTransferPengembalian.remoteUrl || raw.buktiTransferPengembalian.dataUrl)) ||
-            raw.refundUrl ||
-            raw.refundProofUrl ||
-            '';
+            String(pick('refundUrl', 'refundProofUrl', 'buktiPengembalian') || '');
           const refundProof =
             raw.buktiTransferPengembalian && typeof raw.buktiTransferPengembalian === 'object'
               ? raw.buktiTransferPengembalian
               : refundUrl
                 ? {
-                    name: String(raw.refundFileName || 'bukti-pengembalian'),
-                    mimeType: String(raw.refundMimeType || 'image/png'),
+                    name: String(pick('refundFileName') || 'bukti-pengembalian'),
+                    mimeType: String(pick('refundMimeType') || 'image/png'),
                     size: 0,
                     dataUrl: String(refundUrl),
                     remoteUrl: String(refundUrl),
                   }
                 : undefined;
 
-          const rawNominal = raw.nominal ?? raw.nominalKlaim;
+          const rawNominal = pick('nominal', 'nominalKlaim', 'jumlah');
           const numericNominal = Number(rawNominal);
           const safeNominal =
             typeof rawNominal === 'number'
@@ -702,28 +756,65 @@ function doPost(e) {
                 ? numericNominal
                 : parseRupiahInput(rawNominal);
 
+          const hasCabangKey = looseMap.has('cabang');
+          const resolvedCabang = hasCabangKey
+            ? String(pick('cabang') ?? '')
+            : String(pick('program') ?? '');
+          const resolvedProgramKursus = hasCabangKey
+            ? String(pick('programKursus', 'durasi', 'program') ?? '')
+            : String(pick('programKursus', 'durasi') ?? '');
+
+          const validStatuses = CLAIM_STATUS_OPTIONS.map((o) => o.value);
+          const rawBlankStatus =
+            typeof raw[''] === 'string' && validStatuses.includes(raw[''].trim())
+              ? raw[''].trim()
+              : undefined;
+          const resolvedStatus = String(
+            pick('status', 'persetujuanStatus', 'statusPersetujuan', 'statusKlaim') ||
+              rawBlankStatus ||
+              'Menunggu Verifikasi',
+          );
+
+          const createdAtVal = String(
+            pick('createdAt', 'timestamp', 'waktu', 'tanggal', 'date') ?? '',
+          );
+
           return {
             ...raw,
-            id: String(raw.id || ticket),
+            id: String(pick('id') || ticket),
             ticketNumber: ticket,
-            createdAt: String(raw.createdAt || raw.timestamp || raw.tanggal || ''),
-            updatedAt: String(raw.updatedAt || raw.createdAt || raw.timestamp || ''),
-            namaSiswa: String(raw.namaSiswa || ''),
-            nomorRegistrasi: String(raw.noRegistrasi ?? raw.nomorRegistrasi ?? ''),
-            nomorPonsel: String(raw.noPonsel ?? raw.nomorPonsel ?? ''),
-            cabang: String(raw.cabang || raw.program || ''),
-            programKursus: String(raw.programKursus || raw.durasi || ''),
-            periode: String(raw.periode || raw.grade || ''),
-            namaBank: String(raw.namaBank || ''),
-            nomorRekening: String(raw.noRekening ?? raw.nomorRekening ?? ''),
-            namaPemilikRekening: String(raw.namaPemilik || raw.namaPemilikRekening || ''),
+            createdAt: createdAtVal,
+            updatedAt: String(pick('updatedAt', 'diperbarui') || createdAtVal),
+            namaSiswa: String(pick('namaSiswa', 'namaLengkap', 'nama') ?? ''),
+            nomorRegistrasi: String(
+              pick('noRegistrasi', 'nomorRegistrasi', 'noRegist', 'regist') ?? '',
+            ),
+            nomorPonsel: String(
+              pick('noPonsel', 'nomorPonsel', 'noHp', 'nomorHp', 'noWa', 'whatsapp') ?? '',
+            ),
+            cabang: resolvedCabang,
+            programKursus: resolvedProgramKursus,
+            periode: formatPeriodeValue(pick('periode', 'grade') ?? ''),
+            namaBank: String(pick('namaBank', 'bank', 'namaBankTujuan') ?? ''),
+            nomorRekening: String(
+              pick('noRekening', 'nomorRekening', 'rekening') ?? '',
+            ),
+            namaPemilikRekening: String(
+              pick(
+                'namaPemilik',
+                'namaPemilikRekening',
+                'namaRekening',
+                'pemilikRekening',
+                'atasNama',
+              ) ?? '',
+            ),
             nominalKlaim: safeNominal,
-            alasanKlaim: String(raw.alasan || raw.alasanKlaim || ''),
+            alasanKlaim: String(pick('alasan', 'alasanKlaim', 'keterangan') ?? ''),
             buktiTransferSebelumnya: initialProof,
             buktiTransferPengembalian: refundProof,
-            status: String(raw.status || 'Menunggu Verifikasi'),
-            catatanPengembalian: raw.catatanPengembalian ? String(raw.catatanPengembalian) : '',
-            notifikasiTerkirimAt: raw.notifikasiTerkirimAt ? String(raw.notifikasiTerkirimAt) : '',
+            status: resolvedStatus,
+            catatanPengembalian: String(pick('catatanPengembalian') ?? ''),
+            notifikasiTerkirimAt: String(pick('notifikasiTerkirimAt', 'waktuNotifikasi') ?? ''),
           };
         }
 
@@ -821,7 +912,8 @@ function doPost(e) {
           ensureGasConfigured();
           let response;
           try {
-            response = await fetch(WEB_APP_URL, {
+            const sep = WEB_APP_URL.includes('?') ? '&' : '?';
+            response = await fetch(`${WEB_APP_URL}${sep}_t=${Date.now()}`, {
               method: 'GET',
               redirect: 'follow',
             });
@@ -885,7 +977,6 @@ function doPost(e) {
           const base64Data = extractPureBase64(input.buktiTransferSebelumnya.dataUrl);
 
           const result = await postToGas({
-            action: 'submitClaim',
             ticketId: ticketNumber,
             namaSiswa: record.namaSiswa,
             noRegistrasi: record.nomorRegistrasi,
@@ -901,8 +992,6 @@ function doPost(e) {
             fileData: base64Data,
             fileName: input.buktiTransferSebelumnya.name,
             mimeType: input.buktiTransferSebelumnya.mimeType || 'application/octet-stream',
-            createdAt: record.createdAt,
-            status: record.status,
           });
 
           if (result && result.claim) {
@@ -1492,6 +1581,17 @@ function doPost(e) {
                       <p id="err-alasanKlaim" class="mt-1.5 text-xs text-red-700 ${e.alasanKlaim ? '' : 'hidden'}">${escapeHtml(e.alasanKlaim || '')}</p>
                     </div>
                   </section>
+
+                  ${
+                    f.submitError
+                      ? `
+                        <div id="public-submit-error" role="alert" class="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                          ${icon('alert-circle', 'mt-0.5 h-4 w-4 shrink-0 text-red-600')}
+                          <span>${escapeHtml(f.submitError)}</span>
+                        </div>
+                      `
+                      : ''
+                  }
 
                   <div class="flex flex-col-reverse gap-3 border-t border-[#8E1616]/10 pt-6 sm:flex-row sm:items-center sm:justify-between">
                     <p class="text-xs text-[#8C5E5E]">
@@ -3064,6 +3164,12 @@ function doPost(e) {
                 state.form.isSubmitting = false;
               }
               render();
+              if (state.form.submitError) {
+                const submitErrEl = document.getElementById('public-submit-error');
+                if (submitErrEl) {
+                  submitErrEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+              }
             });
           }
 

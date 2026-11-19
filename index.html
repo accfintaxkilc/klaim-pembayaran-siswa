@@ -75,18 +75,13 @@
          * =====================================================================
          * KONFIGURASI GOOGLE APPS SCRIPT & PORTAL ADMINISTRATOR
          * =====================================================================
-         * Tempelkan URL Web App hasil deploy Google Apps Script (berakhiran /exec)
-         * pada konstanta WEB_APP_URL di bawah ini agar seluruh pengajuan klaim,
-         * unggah bukti transfer ke Google Drive, dan pembaruan status langsung
-         * terhubung ke Google Sheets & Google Drive Anda.
-         *
-         * Jika WEB_APP_URL masih kosong (""), aplikasi berjalan dalam mode
-         * penyimpanan lokal browser (IndexedDB / localStorage) agar dapat
-         * langsung digunakan dan diuji coba.
+         * URL Web App hasil deploy Google Apps Script (berakhiran /exec) yang
+         * menghubungkan penyimpanan formulir, unggah bukti transfer ke Google Drive,
+         * pengambilan data admin, dan pembaruan status ke Google Sheets & Drive.
          */
-        const WEB_APP_URL = 'https://script.google.com/macros/s/AKfycbwsqZDhvEl1ppjYcDpkiQzcqWe4E2_xOlc9kIiK_VWFjF7IUpp469JO3J6Xj8WrIt4/exec';
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwMHvkF9POEejaW1H_HX3DGfzWyFh-pUcMs2dbbaD2c4FjH7wxxABv3okShEPTAvPfd/exec";
 
-        /** PIN akses untuk membuka Mode Administrator. */
+        /** PIN akses untuk membuka Mode Administrator (?mode=admin). */
         const ADMIN_PIN = '123456';
 
         /** Tautan Grup WhatsApp tujuan pengiriman pesan konfirmasi & bukti. */
@@ -145,19 +140,9 @@
         const ALLOWED_PROOF_MIME_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
         const MAX_PROOF_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
 
-        const DB_NAME = 'student_overpayment_claims_db';
-        const DB_VERSION = 1;
-        const STORE_NAME = 'claims';
-        const LEGACY_STORAGE_KEY = 'student_overpayment_claims_v1';
-
         const GOOGLE_APPS_SCRIPT_TEMPLATE = `// Salin kode ini ke Google Apps Script (Extensions > Apps Script di Google Sheets)
 const FOLDER_ID = 'GANTI_DENGAN_ID_FOLDER_GOOGLE_DRIVE';
 const SHEET_NAME = 'KlaimPembayaran';
-// Opsional: isi URL & Token Gateway WhatsApp (mis. Fonnte/Wablas) untuk kirim lampiran & pesan otomatis dari server GAS
-const WA_GATEWAY_URL = '';
-const WA_GATEWAY_TOKEN = '';
-// ID Grup WhatsApp (format JID gateway mis. 120363xxxxxx@g.us) untuk grup: ${WHATSAPP_GROUP_URL}
-const WA_GROUP_ID = '';
 
 function getOrCreateSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -165,24 +150,23 @@ function getOrCreateSheet_() {
   if (!sheet) {
     sheet = ss.insertSheet(SHEET_NAME);
     sheet.appendRow([
-      'ID', 'Nomor Tiket', 'Tanggal Pengajuan', 'Diperbarui',
-      'Nama Siswa', 'Nomor Registrasi', 'Nomor Ponsel', 'Cabang',
-      'Program Kursus', 'Nama Bank', 'Nomor Rekening', 'Pemilik Rekening',
-      'Nominal Klaim', 'Alasan Klaim', 'Status',
-      'URL Bukti Sebelumnya', 'Nama Bukti Sebelumnya', 'Mime Bukti Sebelumnya',
-      'URL Bukti Pengembalian', 'Nama Bukti Pengembalian', 'Mime Bukti Pengembalian',
-      'Catatan Pengembalian', 'Waktu Notifikasi', 'Periode'
+      'ticketId', 'Tanggal Pengajuan', 'Diperbarui',
+      'namaSiswa', 'noRegistrasi', 'noPonsel', 'program',
+      'durasi', 'grade', 'namaBank', 'noRekening', 'namaPemilik',
+      'nominal', 'alasan', 'status',
+      'fileUrl', 'fileName', 'mimeType',
+      'refundUrl', 'refundFileName', 'refundMimeType',
+      'catatanPengembalian', 'waktuNotifikasi'
     ]);
   }
   return sheet;
 }
 
-function saveBase64ToDrive_(proof, prefix) {
-  if (!proof || !proof.dataUrl) return { viewUrl: '', downloadUrl: '' };
-  const parts = proof.dataUrl.split(',');
-  const base64Data = parts.length > 1 ? parts[1] : parts[0];
-  const decoded = Utilities.base64Decode(base64Data);
-  const blob = Utilities.newBlob(decoded, proof.mimeType || 'application/octet-stream', prefix + '_' + proof.name);
+function saveBase64ToDrive_(base64Data, fileName, mimeType, prefix) {
+  if (!base64Data) return { viewUrl: '', downloadUrl: '' };
+  const cleanBase64 = base64Data.indexOf(',') !== -1 ? base64Data.split(',')[1] : base64Data;
+  const decoded = Utilities.base64Decode(cleanBase64);
+  const blob = Utilities.newBlob(decoded, mimeType || 'application/octet-stream', prefix + '_' + (fileName || 'bukti'));
   const folder = DriveApp.getFolderById(FOLDER_ID);
   const file = folder.createFile(blob);
   file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
@@ -193,128 +177,111 @@ function saveBase64ToDrive_(proof, prefix) {
   };
 }
 
-function sendWhatsAppFromGas_(phone, message, mediaUrl) {
-  if (!WA_GATEWAY_URL || !phone) return;
-  const payload = { target: phone, message: message };
-  if (mediaUrl) {
-    payload.url = mediaUrl;
-  }
-  UrlFetchApp.fetch(WA_GATEWAY_URL, {
-    method: 'post',
-    headers: { Authorization: WA_GATEWAY_TOKEN },
-    payload: payload,
-    muteHttpExceptions: true
-  });
-}
-
 function doGet(e) {
   const sheet = getOrCreateSheet_();
   const rows = sheet.getDataRange().getValues();
-  const claims = [];
+  const data = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
-    if (!r[1]) continue;
-    claims.push({
-      id: r[0],
-      ticketNumber: r[1],
-      createdAt: r[2],
-      updatedAt: r[3],
-      namaSiswa: r[4],
-      nomorRegistrasi: String(r[5]),
-      nomorPonsel: String(r[6]),
-      cabang: r[7],
-      programKursus: r[8],
+    if (!r[0]) continue;
+    data.push({
+      ticketId: String(r[0]),
+      createdAt: r[1],
+      updatedAt: r[2],
+      namaSiswa: r[3],
+      noRegistrasi: String(r[4]),
+      noPonsel: String(r[5]),
+      program: r[6],
+      durasi: r[7],
+      grade: r[8],
       namaBank: r[9],
-      nomorRekening: String(r[10]),
-      namaPemilikRekening: r[11],
-      nominalKlaim: Number(r[12]) || 0,
-      alasanKlaim: r[13],
-      status: r[14],
-      buktiTransferSebelumnya: {
-        name: r[16] || 'bukti',
-        mimeType: r[17] || 'image/png',
-        size: 0,
-        dataUrl: r[15],
-        remoteUrl: r[15]
-      },
-      buktiTransferPengembalian: r[18] ? {
-        name: r[19] || 'refund',
-        mimeType: r[20] || 'image/png',
-        size: 0,
-        dataUrl: r[18],
-        remoteUrl: r[18]
-      } : undefined,
+      noRekening: String(r[10]),
+      namaPemilik: r[11],
+      nominal: Number(r[12]) || 0,
+      alasan: r[13],
+      status: r[14] || 'Menunggu Verifikasi',
+      fileUrl: r[15] || '',
+      fileName: r[16] || 'bukti-transfer',
+      mimeType: r[17] || 'image/png',
+      refundUrl: r[18] || '',
+      refundFileName: r[19] || '',
+      refundMimeType: r[20] || 'image/png',
       catatanPengembalian: r[21] || '',
-      notifikasiTerkirimAt: r[22] || '',
-      periode: r[23] || ''
+      notifikasiTerkirimAt: r[22] || ''
     });
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ ok: true, claims: claims.reverse() }))
+    .createTextOutput(JSON.stringify({ ok: true, data: data.reverse() }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
 function doPost(e) {
   const payload = JSON.parse(e.postData.contents);
   const sheet = getOrCreateSheet_();
+  const nowIso = new Date().toISOString();
 
-  if (payload.action === 'submitClaim') {
-    const c = payload.claim;
-    const saved = saveBase64ToDrive_(c.buktiTransferSebelumnya, c.ticketNumber + '_awal');
-    sheet.appendRow([
-      c.id, c.ticketNumber, c.createdAt, c.updatedAt,
-      c.namaSiswa, c.nomorRegistrasi, c.nomorPonsel, c.cabang,
-      c.programKursus, c.namaBank, c.nomorRekening, c.namaPemilikRekening,
-      c.nominalKlaim, c.alasanKlaim, c.status,
-      saved.viewUrl, c.buktiTransferSebelumnya.name, c.buktiTransferSebelumnya.mimeType || 'image/png',
-      '', '', '', '', '', c.periode || ''
-    ]);
-    return ContentService
-      .createTextOutput(JSON.stringify({ ok: true, proofUrl: saved.viewUrl }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-
-  const rows = sheet.getDataRange().getValues();
-  for (let i = 1; i < rows.length; i++) {
-    if (rows[i][1] === payload.ticketNumber) {
-      const rowNum = i + 1;
-      if (payload.action === 'updateStatus') {
-        sheet.getRange(rowNum, 4).setValue(payload.updatedAt);
-        sheet.getRange(rowNum, 15).setValue(payload.status);
+  if (payload.action === 'updateStatus') {
+    const rows = sheet.getDataRange().getValues();
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === String(payload.ticketId)) {
+        const rowNum = i + 1;
+        sheet.getRange(rowNum, 3).setValue(nowIso);
+        sheet.getRange(rowNum, 15).setValue(payload.newStatus);
         return ContentService
           .createTextOutput(JSON.stringify({ ok: true }))
           .setMimeType(ContentService.MimeType.JSON);
-      } else if (payload.action === 'uploadRefundProof') {
-        const savedRefund = saveBase64ToDrive_(payload.refundProof, payload.ticketNumber + '_refund');
-        const finalMessage = payload.message;
-        sheet.getRange(rowNum, 4).setValue(payload.updatedAt);
-        if (payload.status) sheet.getRange(rowNum, 15).setValue(payload.status);
+      }
+    }
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: 'Tiket tidak ditemukan.' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (payload.action === 'uploadRefundProof') {
+    const rows = sheet.getDataRange().getValues();
+    for (let i = 1; i < rows.length; i++) {
+      if (String(rows[i][0]) === String(payload.ticketId)) {
+        const rowNum = i + 1;
+        const savedRefund = saveBase64ToDrive_(payload.fileData, payload.fileName, payload.mimeType, payload.ticketId + '_refund');
+        sheet.getRange(rowNum, 3).setValue(nowIso);
+        if (payload.newStatus) sheet.getRange(rowNum, 15).setValue(payload.newStatus);
         sheet.getRange(rowNum, 19).setValue(savedRefund.viewUrl);
-        sheet.getRange(rowNum, 20).setValue(payload.refundProof.name);
-        sheet.getRange(rowNum, 21).setValue(payload.refundProof.mimeType || 'image/png');
+        sheet.getRange(rowNum, 20).setValue(payload.fileName || 'refund');
+        sheet.getRange(rowNum, 21).setValue(payload.mimeType || 'image/png');
         sheet.getRange(rowNum, 22).setValue(payload.note || '');
-        sheet.getRange(rowNum, 23).setValue(payload.updatedAt);
-        if (payload.sendToPhone !== false && payload.phoneNormalized) {
-          sendWhatsAppFromGas_(payload.phoneNormalized, finalMessage, savedRefund.downloadUrl);
-        }
-        if (payload.sendToGroup !== false && WA_GROUP_ID) {
-          sendWhatsAppFromGas_(WA_GROUP_ID, finalMessage, savedRefund.downloadUrl);
-        }
+        sheet.getRange(rowNum, 23).setValue(nowIso);
         return ContentService
-          .createTextOutput(JSON.stringify({
-            ok: true,
-            refundProofUrl: savedRefund.viewUrl,
-            downloadUrl: savedRefund.downloadUrl,
-            finalMessage: finalMessage
-          }))
+          .createTextOutput(JSON.stringify({ ok: true, refundProofUrl: savedRefund.viewUrl, finalMessage: payload.message }))
           .setMimeType(ContentService.MimeType.JSON);
       }
-      break;
     }
   }
 
+  const saved = saveBase64ToDrive_(payload.fileData, payload.fileName, payload.mimeType, payload.ticketId + '_awal');
+  sheet.appendRow([
+    payload.ticketId,
+    payload.createdAt || nowIso,
+    nowIso,
+    payload.namaSiswa,
+    payload.noRegistrasi,
+    payload.noPonsel,
+    payload.program,
+    payload.durasi,
+    payload.grade,
+    payload.namaBank,
+    payload.noRekening,
+    payload.namaPemilik,
+    payload.nominal,
+    payload.alasan,
+    payload.status || 'Menunggu Verifikasi',
+    saved.viewUrl,
+    payload.fileName || 'bukti-transfer',
+    payload.mimeType || 'image/png',
+    '', '', '', '', ''
+  ]);
+
   return ContentService
-    .createTextOutput(JSON.stringify({ ok: false, error: 'Tiket tidak ditemukan di Google Sheets.' }))
+    .createTextOutput(JSON.stringify({ ok: true, proofUrl: saved.viewUrl }))
     .setMimeType(ContentService.MimeType.JSON);
 }`;
 
@@ -640,6 +607,17 @@ function doPost(e) {
           return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1600`;
         }
 
+        function resolveProofPreviewUrl(proof) {
+          if (!proof) return '';
+          const raw = proof.dataUrl || proof.remoteUrl || '';
+          if (!raw) return '';
+          if (raw.startsWith('data:')) return raw;
+          const isPdf =
+            proof.mimeType === 'application/pdf' ||
+            String(proof.name || '').toLowerCase().endsWith('.pdf');
+          return getDriveRenderUrl(raw, isPdf ? 'application/pdf' : proof.mimeType);
+        }
+
         function buildWhatsAppUrl(phone, message) {
           const normalized = normalizePhoneToWa(phone);
           return `https://wa.me/${normalized}?text=${encodeURIComponent(message)}`;
@@ -650,275 +628,114 @@ function doPost(e) {
         }
 
         // ===================================================================
-        // SEED DATA & STORAGE (IndexedDB + localStorage fallback + GAS)
+        // WEB STORAGE & GOOGLE APPS SCRIPT API (NO LOCAL SERVER)
         // ===================================================================
-        function createSampleReceiptSvgDataUrl(opts) {
-          const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="560" height="360" viewBox="0 0 560 360">
-            <rect width="560" height="360" fill="#FEF9F9"/>
-            <rect x="24" y="24" width="512" height="312" rx="16" fill="#FFFFFF" stroke="#8E1616" stroke-opacity="0.18" stroke-width="1.5"/>
-            <rect x="24" y="24" width="512" height="60" rx="16" fill="#8E1616"/>
-            <text x="48" y="61" font-family="sans-serif" font-size="18" font-weight="700" fill="#FFFFFF">BUKTI TRANSFER ELEKTRONIK · ${opts.bank}</text>
-            <text x="48" y="122" font-family="sans-serif" font-size="13" fill="#8C5E5E">Status Transaksi</text>
-            <text x="48" y="144" font-family="sans-serif" font-size="16" font-weight="700" fill="#16A34A">BERHASIL</text>
-            <text x="300" y="122" font-family="sans-serif" font-size="13" fill="#8C5E5E">Tanggal &amp; Waktu</text>
-            <text x="300" y="144" font-family="sans-serif" font-size="14" font-weight="600" fill="#3D0C0C">${opts.date}</text>
-            <line x1="48" y1="168" x2="512" y2="168" stroke="#8E1616" stroke-opacity="0.12"/>
-            <text x="48" y="198" font-family="sans-serif" font-size="13" fill="#8C5E5E">Pengirim / Rekening Sumber</text>
-            <text x="48" y="220" font-family="sans-serif" font-size="15" font-weight="600" fill="#3D0C0C">${opts.sender}</text>
-            <text x="48" y="254" font-family="sans-serif" font-size="13" fill="#8C5E5E">Nominal Transfer</text>
-            <text x="48" y="282" font-family="monospace" font-size="22" font-weight="700" fill="#8E1616">${opts.amount}</text>
-            <text x="300" y="254" font-family="sans-serif" font-size="13" fill="#8C5E5E">Nomor Referensi</text>
-            <text x="300" y="280" font-family="monospace" font-size="14" font-weight="600" fill="#3D0C0C">${opts.ref}</text>
-          </svg>`;
-          return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
-        }
-
-        const SEED_CLAIMS = [
-          {
-            id: 'seed-1',
-            ticketNumber: 'KLM-20261116-4812',
-            createdAt: '2026-11-16T03:15:00.000Z',
-            updatedAt: '2026-11-16T03:15:00.000Z',
-            namaSiswa: 'Nadia Kusuma Wardani',
-            nomorRegistrasi: '101010',
-            nomorPonsel: '081234567891',
-            cabang: 'Pare - Offline',
-            programKursus: 'IEP 1 Bulan Camp AC',
-            periode: '10/11/2026',
-            namaBank: 'BCA',
-            nomorRekening: '8820194421',
-            namaPemilikRekening: 'NADIA KUSUMA WARDANI',
-            nominalKlaim: 450000,
-            alasanKlaim:
-              'Terjadi transfer ganda untuk pelunasan biaya program IEP 1 Bulan Camp AC periode November.',
-            buktiTransferSebelumnya: {
-              name: 'struk-bca-nadia.svg',
-              mimeType: 'image/png',
-              size: 184200,
-              dataUrl: createSampleReceiptSvgDataUrl({
-                bank: 'BCA',
-                sender: 'NADIA KUSUMA WARDANI',
-                amount: 'Rp 2.450.000',
-                date: '16 Nov 2026, 09:40 WIB',
-                ref: 'TRF-20261116-8812',
-              }),
-            },
-            status: 'Menunggu Verifikasi',
-          },
-          {
-            id: 'seed-2',
-            ticketNumber: 'KLM-20261115-2194',
-            createdAt: '2026-11-15T07:20:00.000Z',
-            updatedAt: '2026-11-16T01:45:00.000Z',
-            namaSiswa: 'Fajar Ramadhan',
-            nomorRegistrasi: '102485',
-            nomorPonsel: '085699112233',
-            cabang: 'Yogya - Mantrijeron',
-            programKursus: 'TOEFL Scoring & Class 1 Bulan',
-            periode: '10/11/2026',
-            namaBank: 'Mandiri',
-            nomorRekening: '1370009182731',
-            namaPemilikRekening: 'FAJAR RAMADHAN',
-            nominalKlaim: 600000,
-            alasanKlaim:
-              'Pindah paket dari Camp VIP ke Non-Camp sehingga terdapat selisih kelebihan biaya akomodasi.',
-            buktiTransferSebelumnya: {
-              name: 'livin-mandiri-fajar.svg',
-              mimeType: 'image/png',
-              size: 215000,
-              dataUrl: createSampleReceiptSvgDataUrl({
-                bank: 'MANDIRI',
-                sender: 'FAJAR RAMADHAN',
-                amount: 'Rp 1.850.000',
-                date: '15 Nov 2026, 14:12 WIB',
-                ref: 'MDR-99201831',
-              }),
-            },
-            status: 'Disetujui',
-          },
-          {
-            id: 'seed-3',
-            ticketNumber: 'KLM-20261114-7730',
-            createdAt: '2026-11-14T04:00:00.000Z',
-            updatedAt: '2026-11-15T06:30:00.000Z',
-            namaSiswa: 'Siti Nurhaliza',
-            nomorRegistrasi: '100892',
-            nomorPonsel: '082188776655',
-            cabang: 'Makassar - Panakukang',
-            programKursus: 'English Master 2 Bulan',
-            periode: '01/11/2026',
-            namaBank: 'BRI',
-            nomorRekening: '003401009988501',
-            namaPemilikRekening: 'SITI NURHALIZA',
-            nominalKlaim: 350000,
-            alasanKlaim:
-              'Kelebihan nominal transfer karena tidak memasukkan kode promo diskon alumni saat pembayaran.',
-            buktiTransferSebelumnya: {
-              name: 'brimo-siti.svg',
-              mimeType: 'image/png',
-              size: 164500,
-              dataUrl: createSampleReceiptSvgDataUrl({
-                bank: 'BRI',
-                sender: 'SITI NURHALIZA',
-                amount: 'Rp 2.150.000',
-                date: '14 Nov 2026, 10:55 WIB',
-                ref: 'BRI-77482019',
-              }),
-            },
-            buktiTransferPengembalian: {
-              name: 'refund-bri-siti.svg',
-              mimeType: 'image/png',
-              size: 148000,
-              dataUrl: createSampleReceiptSvgDataUrl({
-                bank: 'BCA FINANCE',
-                sender: 'TIM FINANCE KLAIM',
-                amount: 'Rp 350.000',
-                date: '15 Nov 2026, 13:30 WIB',
-                ref: 'RFD-KLM-7730',
-              }),
-            },
-            catatanPengembalian: 'Dana refund telah ditransfer ke BRI a.n. SITI NURHALIZA.',
-            notifikasiTerkirimAt: '2026-11-15T06:31:00.000Z',
-            status: 'Selesai / Ditransfer',
-          },
-        ];
-
-        function openDb() {
-          return new Promise((resolve, reject) => {
-            if (typeof indexedDB === 'undefined') {
-              reject(new Error('IndexedDB tidak tersedia di lingkungan ini.'));
-              return;
-            }
-            const request = indexedDB.open(DB_NAME, DB_VERSION);
-            request.onupgradeneeded = () => {
-              const db = request.result;
-              if (!db.objectStoreNames.contains(STORE_NAME)) {
-                db.createObjectStore(STORE_NAME, { keyPath: 'ticketNumber' });
-              }
-            };
-            request.onsuccess = () => resolve(request.result);
-            request.onerror = () => reject(request.error || new Error('Gagal membuka IndexedDB.'));
-          });
-        }
-
-        function readAllFromStore(db) {
-          return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readonly');
-            const store = tx.objectStore(STORE_NAME);
-            const req = store.getAll();
-            req.onsuccess = () => resolve(req.result || []);
-            req.onerror = () => reject(req.error || new Error('Gagal membaca data klaim.'));
-          });
-        }
-
-        function putAllToStore(db, records) {
-          return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
-            const store = tx.objectStore(STORE_NAME);
-            for (const rec of records) {
-              store.put(rec);
-            }
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error || new Error('Gagal menyimpan data klaim.'));
-          });
-        }
-
-        function putOneToStore(db, record) {
-          return new Promise((resolve, reject) => {
-            const tx = db.transaction(STORE_NAME, 'readwrite');
-            tx.objectStore(STORE_NAME).put(record);
-            tx.oncomplete = () => resolve();
-            tx.onerror = () => reject(tx.error || new Error('Gagal menyimpan berkas klaim.'));
-          });
-        }
-
-        function mergeMissingSeedFields(records, seedClaims) {
-          const seedByTicket = new Map(seedClaims.map((s) => [s.ticketNumber, s]));
-          let changed = false;
-          const merged = records.map((rec) => {
-            const seed = seedByTicket.get(rec.ticketNumber);
-            if (seed && !rec.periode && seed.periode) {
-              changed = true;
-              return { ...rec, periode: seed.periode };
-            }
-            return rec;
-          });
-          return { merged, changed };
-        }
-
-        async function getLocalClaims(seedClaims) {
-          try {
-            const db = await openDb();
-            let records = await readAllFromStore(db);
-
-            if (records.length === 0) {
-              let initial = seedClaims;
-              try {
-                const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
-                if (legacyRaw) {
-                  const parsed = JSON.parse(legacyRaw);
-                  if (Array.isArray(parsed) && parsed.length > 0) {
-                    initial = parsed;
-                  }
-                }
-              } catch {
-                // Abaikan
-              }
-              const { merged } = mergeMissingSeedFields(initial, seedClaims);
-              await putAllToStore(db, merged);
-              records = merged;
-            } else {
-              const { merged, changed } = mergeMissingSeedFields(records, seedClaims);
-              if (changed) {
-                await putAllToStore(db, merged);
-                records = merged;
-              }
-            }
-
-            db.close();
-            return records.sort(
-              (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-            );
-          } catch {
-            try {
-              const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-              if (!raw) {
-                localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(seedClaims));
-                return seedClaims;
-              }
-              const parsed = JSON.parse(raw);
-              if (!Array.isArray(parsed)) return seedClaims;
-              const { merged } = mergeMissingSeedFields(parsed, seedClaims);
-              return merged;
-            } catch {
-              return seedClaims;
-            }
-          }
-        }
-
-        async function saveLocalClaimRecord(record, seedClaims) {
-          try {
-            const db = await openDb();
-            const existing = await readAllFromStore(db);
-            if (existing.length === 0) {
-              await putAllToStore(db, seedClaims);
-            }
-            await putOneToStore(db, record);
-            db.close();
-            return record;
-          } catch {
-            const existing = await getLocalClaims(seedClaims);
-            const exists = existing.some((c) => c.ticketNumber === record.ticketNumber);
-            const next = exists
-              ? existing.map((c) => (c.ticketNumber === record.ticketNumber ? record : c))
-              : [record, ...existing];
-            localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(next));
-            return record;
-          }
-        }
-
         function isGasConfigured() {
-          return WEB_APP_URL.trim().length > 0;
+          const trimmed = WEB_APP_URL.trim();
+          return (
+            trimmed.length > 0 &&
+            trimmed !== 'TEMPEL_URL_EXEC_ANDA_DISINI' &&
+            /^https?:\/\//i.test(trimmed)
+          );
+        }
+
+        function ensureGasConfigured() {
+          if (!isGasConfigured()) {
+            throw new Error(
+              'URL Web App Google Apps Script (WEB_APP_URL) belum dikonfigurasi.',
+            );
+          }
+        }
+
+        function normalizeClaimRecord(raw) {
+          if (!raw || typeof raw !== 'object') return raw;
+          const ticket = String(raw.ticketId || raw.ticketNumber || raw.id || '');
+          const initialProofUrl =
+            (raw.buktiTransferSebelumnya &&
+              (raw.buktiTransferSebelumnya.remoteUrl || raw.buktiTransferSebelumnya.dataUrl)) ||
+            raw.fileUrl ||
+            raw.buktiUrl ||
+            raw.proofUrl ||
+            raw.url ||
+            '';
+          const initialProof =
+            raw.buktiTransferSebelumnya && typeof raw.buktiTransferSebelumnya === 'object'
+              ? raw.buktiTransferSebelumnya
+              : initialProofUrl
+                ? {
+                    name: String(raw.fileName || 'bukti-transfer'),
+                    mimeType: String(raw.mimeType || 'image/png'),
+                    size: Number(raw.fileSize) || 0,
+                    dataUrl: String(initialProofUrl),
+                    remoteUrl: String(initialProofUrl),
+                  }
+                : undefined;
+
+          const refundUrl =
+            (raw.buktiTransferPengembalian &&
+              (raw.buktiTransferPengembalian.remoteUrl || raw.buktiTransferPengembalian.dataUrl)) ||
+            raw.refundUrl ||
+            raw.refundProofUrl ||
+            '';
+          const refundProof =
+            raw.buktiTransferPengembalian && typeof raw.buktiTransferPengembalian === 'object'
+              ? raw.buktiTransferPengembalian
+              : refundUrl
+                ? {
+                    name: String(raw.refundFileName || 'bukti-pengembalian'),
+                    mimeType: String(raw.refundMimeType || 'image/png'),
+                    size: 0,
+                    dataUrl: String(refundUrl),
+                    remoteUrl: String(refundUrl),
+                  }
+                : undefined;
+
+          return {
+            ...raw,
+            id: String(raw.id || ticket),
+            ticketNumber: ticket,
+            createdAt: String(raw.createdAt || raw.timestamp || raw.tanggal || ''),
+            updatedAt: String(raw.updatedAt || raw.createdAt || raw.timestamp || ''),
+            namaSiswa: String(raw.namaSiswa || ''),
+            nomorRegistrasi: String(raw.noRegistrasi ?? raw.nomorRegistrasi ?? ''),
+            nomorPonsel: String(raw.noPonsel ?? raw.nomorPonsel ?? ''),
+            cabang: String(raw.cabang || raw.program || ''),
+            programKursus: String(raw.programKursus || raw.durasi || ''),
+            periode: String(raw.periode || raw.grade || ''),
+            namaBank: String(raw.namaBank || ''),
+            nomorRekening: String(raw.noRekening ?? raw.nomorRekening ?? ''),
+            namaPemilikRekening: String(raw.namaPemilik || raw.namaPemilikRekening || ''),
+            nominalKlaim: Number(raw.nominal ?? raw.nominalKlaim) || 0,
+            alasanKlaim: String(raw.alasan || raw.alasanKlaim || ''),
+            buktiTransferSebelumnya: initialProof,
+            buktiTransferPengembalian: refundProof,
+            status: String(raw.status || 'Menunggu Verifikasi'),
+            catatanPengembalian: raw.catatanPengembalian ? String(raw.catatanPengembalian) : '',
+            notifikasiTerkirimAt: raw.notifikasiTerkirimAt ? String(raw.notifikasiTerkirimAt) : '',
+          };
+        }
+
+        function isAdminUrlMode() {
+          try {
+            const params = new URLSearchParams(window.location.search);
+            return (params.get('mode') || '').trim().toLowerCase() === 'admin';
+          } catch {
+            return false;
+          }
+        }
+
+        function clearAdminUrlParam() {
+          try {
+            const url = new URL(window.location.href);
+            if (url.searchParams.has('mode')) {
+              url.searchParams.delete('mode');
+              const qs = url.searchParams.toString();
+              const cleanUrl = url.pathname + (qs ? `?${qs}` : '') + url.hash;
+              window.history.replaceState(null, '', cleanUrl);
+            }
+          } catch {
+            // Abaikan jika history API dibatasi
+          }
         }
 
         function fileToProofPayload(file) {
@@ -937,41 +754,88 @@ function doPost(e) {
           });
         }
 
+        function parseGasJsonResponse(rawText, status) {
+          const trimmed = String(rawText || '').trim();
+          if (!trimmed) {
+            throw new Error(`Google Apps Script mengembalikan respons kosong (HTTP ${status}).`);
+          }
+          if (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html') || trimmed.startsWith('<')) {
+            throw new Error(
+              'Google Apps Script tidak mengembalikan JSON (kemungkinan akses Web App belum diatur ke "Anyone" / "Siapa saja" pada menu Deploy).',
+            );
+          }
+          try {
+            return JSON.parse(trimmed);
+          } catch {
+            throw new Error('Format respons JSON dari Google Apps Script tidak valid.');
+          }
+        }
+
+        function extractPureBase64(dataUrl) {
+          const str = String(dataUrl || '');
+          const commaIdx = str.indexOf(',');
+          return commaIdx !== -1 ? str.slice(commaIdx + 1) : str;
+        }
+
         async function postToGas(payload) {
-          const response = await fetch(WEB_APP_URL, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'text/plain;charset=utf-8',
-            },
-            body: JSON.stringify(payload),
-          });
+          ensureGasConfigured();
+          let response;
+          try {
+            response = await fetch(WEB_APP_URL, {
+              method: 'POST',
+              redirect: 'follow',
+              headers: {
+                'Content-Type': 'text/plain;charset=utf-8',
+              },
+              body: JSON.stringify(payload),
+            });
+          } catch {
+            throw new Error(
+              'Gagal terhubung ke Google Apps Script. Pastikan deployment Web App diatur ke Execute as "Me" dan Who has access "Anyone".',
+            );
+          }
+          const rawText = await response.text();
           if (!response.ok) {
             throw new Error(`Google Apps Script mengembalikan status ${response.status}.`);
           }
-          const data = await response.json();
-          if (data && data.ok === false) {
-            throw new Error(data.error || 'Terjadi kesalahan pada Google Apps Script.');
+          const data = parseGasJsonResponse(rawText, response.status);
+          if (data && (data.ok === false || data.success === false || data.status === 'error')) {
+            throw new Error(data.error || data.message || 'Terjadi kesalahan pada Google Apps Script.');
           }
           return data;
         }
 
         async function fetchClaims() {
-          if (isGasConfigured()) {
-            const url = `${WEB_APP_URL}${WEB_APP_URL.includes('?') ? '&' : '?'}action=list`;
-            const response = await fetch(url, { method: 'GET' });
-            if (!response.ok) {
-              throw new Error(`Gagal memuat data dari Google Apps Script (${response.status}).`);
-            }
-            const data = await response.json();
-            if (Array.isArray(data && data.claims)) {
-              return data.claims;
-            }
-            if (Array.isArray(data)) {
-              return data;
-            }
-            throw new Error('Format respons Google Apps Script tidak valid.');
+          ensureGasConfigured();
+          let response;
+          try {
+            response = await fetch(WEB_APP_URL, {
+              method: 'GET',
+              redirect: 'follow',
+            });
+          } catch {
+            throw new Error(
+              'Gagal memuat data dari Google Apps Script. Pastikan deployment Web App diatur ke Execute as "Me" dan Who has access "Anyone".',
+            );
           }
-          return getLocalClaims(SEED_CLAIMS);
+          const rawText = await response.text();
+          if (!response.ok) {
+            throw new Error(`Gagal memuat data dari Google Apps Script (${response.status}).`);
+          }
+          const res = parseGasJsonResponse(rawText, response.status);
+          if (res && (res.ok === false || res.success === false || res.status === 'error')) {
+            throw new Error(res.error || res.message || 'Google Apps Script gagal memuat daftar klaim.');
+          }
+          if (Array.isArray(res && res.data)) {
+            return res.data.map(normalizeClaimRecord);
+          }
+          if (Array.isArray(res && res.claims)) {
+            return res.claims.map(normalizeClaimRecord);
+          }
+          if (Array.isArray(res)) {
+            return res.map(normalizeClaimRecord);
+          }
+          throw new Error('Format respons Google Apps Script tidak valid (array data tidak ditemukan).');
         }
 
         async function submitClaim(input) {
@@ -1006,52 +870,57 @@ function doPost(e) {
             status: 'Menunggu Verifikasi',
           };
 
-          if (isGasConfigured()) {
-            const result = await postToGas({
-              action: 'submitClaim',
-              claim: record,
-            });
-            if (result.claim) {
-              return result.claim;
-            }
-            if (result.proofUrl) {
-              record.buktiTransferSebelumnya = {
-                ...record.buktiTransferSebelumnya,
-                remoteUrl: result.proofUrl,
-              };
-            }
-            return record;
-          }
+          const base64Data = extractPureBase64(input.buktiTransferSebelumnya.dataUrl);
 
-          return saveLocalClaimRecord(record, SEED_CLAIMS);
+          const result = await postToGas({
+            action: 'submitClaim',
+            ticketId: ticketNumber,
+            namaSiswa: record.namaSiswa,
+            noRegistrasi: record.nomorRegistrasi,
+            noPonsel: record.nomorPonsel,
+            program: record.cabang,
+            durasi: record.programKursus,
+            grade: record.periode,
+            namaBank: record.namaBank,
+            noRekening: record.nomorRekening,
+            namaPemilik: record.namaPemilikRekening,
+            nominal: record.nominalKlaim,
+            alasan: record.alasanKlaim,
+            fileData: base64Data,
+            fileName: input.buktiTransferSebelumnya.name,
+            mimeType: input.buktiTransferSebelumnya.mimeType || 'application/octet-stream',
+            createdAt: record.createdAt,
+            status: record.status,
+          });
+
+          if (result && result.claim) {
+            return normalizeClaimRecord(result.claim);
+          }
+          const remoteUrl = (result && (result.proofUrl || result.fileUrl)) || '';
+          if (remoteUrl) {
+            record.buktiTransferSebelumnya = {
+              ...record.buktiTransferSebelumnya,
+              remoteUrl,
+            };
+          }
+          return record;
         }
 
         async function updateClaimStatus(ticketNumber, status, currentClaim) {
           const updatedAt = new Date().toISOString();
 
-          if (isGasConfigured()) {
-            const result = await postToGas({
-              action: 'updateStatus',
-              ticketNumber,
-              status,
-              updatedAt,
-            });
-            if (result.claim) {
-              return result.claim;
-            }
-            if (currentClaim) {
-              return { ...currentClaim, status, updatedAt };
-            }
-            throw new Error(`Status diperbarui, namun detail tiket ${ticketNumber} tidak tersedia.`);
+          const result = await postToGas({
+            action: 'updateStatus',
+            ticketId: ticketNumber,
+            newStatus: status,
+          });
+          if (result && result.claim) {
+            return normalizeClaimRecord(result.claim);
           }
-
-          const existing = await getLocalClaims(SEED_CLAIMS);
-          const target = existing.find((item) => item.ticketNumber === ticketNumber);
-          if (!target) {
-            throw new Error(`Tiket ${ticketNumber} tidak ditemukan.`);
+          if (currentClaim) {
+            return { ...currentClaim, status, updatedAt };
           }
-          const updated = { ...target, status, updatedAt };
-          return saveLocalClaimRecord(updated, SEED_CLAIMS);
+          throw new Error(`Status diperbarui, namun detail tiket ${ticketNumber} tidak tersedia.`);
         }
 
         async function uploadRefundProofAndNotify(params) {
@@ -1070,62 +939,48 @@ function doPost(e) {
           const tujuanNotifikasi =
             sendToGroup && sendToPhone ? 'keduanya' : sendToGroup ? 'grup' : 'ponsel';
 
-          if (isGasConfigured()) {
-            const result = await postToGas({
-              action: 'uploadRefundProof',
-              ticketNumber: claim.ticketNumber,
-              refundProof,
-              phoneNormalized: sendToPhone ? normalizePhoneToWa(claim.nomorPonsel) : '',
-              sendToGroup,
-              sendToPhone,
-              groupUrl: WHATSAPP_GROUP_URL,
-              message,
-              note: note || '',
-              status: markAsTransferred === false ? undefined : 'Selesai / Ditransfer',
-              updatedAt: nowIso,
-            });
+          const result = await postToGas({
+            action: 'uploadRefundProof',
+            ticketId: claim.ticketNumber,
+            newStatus: markAsTransferred === false ? undefined : 'Selesai / Ditransfer',
+            fileData: extractPureBase64(refundProof.dataUrl),
+            fileName: refundProof.name,
+            mimeType: refundProof.mimeType || 'application/octet-stream',
+            refundProof,
+            phoneNormalized: sendToPhone ? normalizePhoneToWa(claim.nomorPonsel) : '',
+            sendToGroup,
+            sendToPhone,
+            groupUrl: WHATSAPP_GROUP_URL,
+            message,
+            note: note || '',
+            updatedAt: nowIso,
+          });
 
-            if (result.claim) {
-              return result.claim;
-            }
-
-            const proofUrl = result.refundProofUrl || refundProof.remoteUrl;
-            const finalMessage = result.finalMessage || message;
-
-            return {
-              ...claim,
-              buktiTransferPengembalian: {
-                ...refundProof,
-                remoteUrl: proofUrl,
-              },
-              catatanPengembalian: (note || '').trim() || claim.catatanPengembalian,
-              pesanNotifikasiTerkirim: finalMessage,
-              tujuanNotifikasi,
-              notifikasiTerkirimAt: nowIso,
-              status: nextStatus,
-              updatedAt: nowIso,
-            };
+          if (result && result.claim) {
+            return normalizeClaimRecord(result.claim);
           }
 
-          const existing = await getLocalClaims(SEED_CLAIMS);
-          const target = existing.find((c) => c.ticketNumber === claim.ticketNumber) || claim;
+          const proofUrl = (result && result.refundProofUrl) || refundProof.remoteUrl;
+          const finalMessage = (result && result.finalMessage) || message;
 
-          const updated = {
-            ...target,
-            buktiTransferPengembalian: refundProof,
-            catatanPengembalian: (note || '').trim() || target.catatanPengembalian,
-            pesanNotifikasiTerkirim: message,
+          return {
+            ...claim,
+            buktiTransferPengembalian: {
+              ...refundProof,
+              remoteUrl: proofUrl,
+            },
+            catatanPengembalian: (note || '').trim() || claim.catatanPengembalian,
+            pesanNotifikasiTerkirim: finalMessage,
             tujuanNotifikasi,
             notifikasiTerkirimAt: nowIso,
             status: nextStatus,
             updatedAt: nowIso,
           };
-
-          return saveLocalClaimRecord(updated, SEED_CLAIMS);
         }
 
         async function proofFileToFileObject(proof) {
-          const response = await fetch(proof.dataUrl);
+          const targetUrl = resolveProofPreviewUrl(proof) || proof.dataUrl || proof.remoteUrl;
+          const response = await fetch(targetUrl);
           const blob = await response.blob();
           return new File([blob], proof.name, { type: proof.mimeType || blob.type });
         }
@@ -1136,10 +991,11 @@ function doPost(e) {
           }
           const img = new Image();
           img.crossOrigin = 'anonymous';
+          const srcUrl = resolveProofPreviewUrl(proof) || proof.dataUrl || proof.remoteUrl;
           await new Promise((resolve, reject) => {
             img.onload = () => resolve();
             img.onerror = () => reject(new Error('Gagal memuat gambar lampiran.'));
-            img.src = proof.dataUrl;
+            img.src = srcUrl;
           });
 
           const canvas = document.createElement('canvas');
@@ -1163,7 +1019,7 @@ function doPost(e) {
         // APPLICATION STATE
         // ===================================================================
         const state = {
-          mode: 'public', // 'public' | 'admin-pin' | 'admin'
+          mode: isAdminUrlMode() ? 'admin-pin' : 'public', // 'public' | 'admin-pin' | 'admin'
           submittedClaim: null,
           showGasSetup: false,
 
@@ -1242,16 +1098,7 @@ function doPost(e) {
 
           const actionBtnHtml =
             mode === 'public'
-              ? `
-                <button
-                  type="button"
-                  id="btn-enter-admin"
-                  class="inline-flex items-center gap-2 rounded-full border border-[#8E1616]/20 bg-white px-5 py-2 text-xs font-semibold text-[#3D0C0C] transition-colors hover:border-[#8E1616]/40 hover:bg-[#FFF0F0] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8E1616] whitespace-nowrap shrink-0 cursor-pointer"
-                >
-                  ${icon('lock', 'h-3.5 w-3.5 text-[#8E1616]')}
-                  Mode Admin
-                </button>
-              `
+              ? ''
               : `
                 <button
                   type="button"
@@ -1276,9 +1123,11 @@ function doPost(e) {
                 <nav aria-label="Navigasi utama" class="hidden md:flex items-center gap-6 text-sm font-medium text-[#7E5454]">
                   ${navHtml}
                 </nav>
-                <div class="flex items-center shrink-0">
-                  ${actionBtnHtml}
-                </div>
+                ${
+                  actionBtnHtml
+                    ? `<div class="flex items-center shrink-0">${actionBtnHtml}</div>`
+                    : ''
+                }
               </div>
             </header>
           `;
@@ -2083,7 +1932,7 @@ function doPost(e) {
                       ${
                         isGasConfigured()
                           ? 'Google Apps Script (Sheets & Drive)'
-                          : 'Penyimpanan Lokal Browser (Siap dihubungkan ke WEB_APP_URL)'
+                          : 'WEB_APP_URL belum dikonfigurasi'
                       }
                     </span>
                   </p>
@@ -2236,6 +2085,9 @@ function doPost(e) {
         }
 
         function renderProofViewer(title, file) {
+          if (!file) {
+            return `<div class="rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-6 text-center text-sm text-[#8C5E5E]">Lampiran bukti transfer belum tersedia.</div>`;
+          }
           const isPdf =
             file.mimeType === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
           const rawUrl = file.dataUrl || file.remoteUrl || '';
@@ -2454,7 +2306,7 @@ function doPost(e) {
                         <div class="flex items-center gap-3 min-w-0">
                           ${
                             savedAttachment.mimeType.startsWith('image/')
-                              ? `<img src="${escapeHtml(savedAttachment.dataUrl)}" alt="Lampiran ${escapeHtml(savedAttachment.name)}" referrerpolicy="no-referrer" class="h-14 w-14 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
+                              ? `<img src="${escapeHtml(resolveProofPreviewUrl(savedAttachment))}" alt="Lampiran ${escapeHtml(savedAttachment.name)}" referrerpolicy="no-referrer" class="h-14 w-14 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
                               : `<div class="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-6 w-6')}</div>`
                           }
                           <div class="min-w-0">
@@ -2590,7 +2442,7 @@ function doPost(e) {
                           <div class="flex items-center gap-3 min-w-0">
                             ${
                               rm.refundProof.mimeType.startsWith('image/')
-                                ? `<img src="${escapeHtml(rm.refundProof.dataUrl)}" alt="Bukti pengembalian ${escapeHtml(rm.refundProof.name)}" referrerpolicy="no-referrer" class="h-11 w-11 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
+                                ? `<img src="${escapeHtml(resolveProofPreviewUrl(rm.refundProof))}" alt="Bukti pengembalian ${escapeHtml(rm.refundProof.name)}" referrerpolicy="no-referrer" class="h-11 w-11 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
                                 : `<div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-5 w-5')}</div>`
                             }
                             <div class="min-w-0">
@@ -2751,7 +2603,7 @@ function doPost(e) {
                     <p class="text-xs text-[#7E5454]">
                       Status koneksi saat ini:
                       <span class="${configured ? 'font-semibold text-emerald-700' : 'font-semibold text-[#8E1616]'}">
-                        ${configured ? 'Terhubung ke WEB_APP_URL' : 'Mode Penyimpanan Lokal (WEB_APP_URL belum diisi)'}
+                        ${configured ? 'Terhubung ke Google Apps Script Web App' : 'WEB_APP_URL belum diisi'}
                       </span>
                     </p>
                   </div>
@@ -2762,19 +2614,18 @@ function doPost(e) {
 
                 <div class="space-y-5 p-6 text-sm text-[#3D0C0C]">
                   <div class="rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-4 space-y-2">
-                    <p class="font-semibold text-[#3D0C0C]">Langkah Konfigurasi:</p>
+                    <p class="font-semibold text-[#3D0C0C]">Langkah Konfigurasi Web App:</p>
                     <ol class="list-decimal pl-5 space-y-1.5 text-xs leading-relaxed text-[#7E5454]">
                       <li>
-                        Buka Google Sheets baru, lalu klik <strong>Extensions &gt; Apps Script</strong> dan
+                        Buka Google Sheets Anda, lalu klik <strong>Extensions &gt; Apps Script</strong> dan
                         tempel skrip di bawah ini (isi <code>FOLDER_ID</code> dengan ID folder Google Drive Anda).
                       </li>
                       <li>
-                        Klik <strong>Deploy &gt; New deployment &gt; Web app</strong>, atur akses ke
-                        <strong>Anyone</strong>, lalu salin URL <code>/exec</code> yang dihasilkan.
+                        Klik <strong>Deploy &gt; New deployment &gt; Web app</strong>, atur <strong>Execute as: Me</strong> dan <strong>Who has access: Anyone</strong>, lalu salin URL <code>/exec</code> yang dihasilkan.
                       </li>
                       <li>
-                        Tempel URL tersebut pada konstanta <code class="font-mono font-semibold text-[#8E1616]">WEB_APP_URL</code> di bagian atas bagian
-                        <code class="font-mono">&lt;script&gt;</code> di file <code class="font-mono">index.html</code>.
+                        Pastikan konstanta <code class="font-mono font-semibold text-[#8E1616]">WEB_APP_URL</code> di bagian atas
+                        <code class="font-mono">&lt;script&gt;</code> file <code class="font-mono">index.html</code> berisi URL <code>/exec</code> tersebut.
                       </li>
                     </ol>
                     ${
@@ -2995,23 +2846,11 @@ function doPost(e) {
               e.preventDefault();
               if (state.mode === 'admin-pin') {
                 state.mode = 'public';
+                clearAdminUrlParam();
                 render();
               } else {
                 window.scrollTo({ top: 0, behavior: 'smooth' });
               }
-            });
-          }
-
-          const enterAdminBtn = document.getElementById('btn-enter-admin');
-          if (enterAdminBtn) {
-            enterAdminBtn.addEventListener('click', () => {
-              state.mode = 'admin-pin';
-              state.pinInput = '';
-              state.pinShow = false;
-              state.pinError = null;
-              render();
-              const pinInput = document.getElementById('admin-pin-input');
-              if (pinInput) pinInput.focus();
             });
           }
 
@@ -3022,6 +2861,7 @@ function doPost(e) {
               state.showGasSetup = false;
               state.previewClaim = null;
               state.refundModal = null;
+              clearAdminUrlParam();
               render();
             });
           }
@@ -3280,6 +3120,7 @@ function doPost(e) {
             if (cancelPinBtn) {
               cancelPinBtn.addEventListener('click', () => {
                 state.mode = 'public';
+                clearAdminUrlParam();
                 render();
               });
             }
@@ -3741,6 +3582,24 @@ function doPost(e) {
             }
           }
         }
+
+        // Sinkronisasi navigasi browser terhadap parameter ?mode=admin
+        window.addEventListener('popstate', () => {
+          const wantAdmin = isAdminUrlMode();
+          if (wantAdmin && state.mode === 'public') {
+            state.mode = 'admin-pin';
+            state.pinInput = '';
+            state.pinShow = false;
+            state.pinError = null;
+            render();
+          } else if (!wantAdmin && state.mode !== 'public') {
+            state.mode = 'public';
+            state.showGasSetup = false;
+            state.previewClaim = null;
+            state.refundModal = null;
+            render();
+          }
+        });
 
         // Initial render
         render();

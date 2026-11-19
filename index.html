@@ -79,7 +79,7 @@
          * menghubungkan penyimpanan formulir, unggah bukti transfer ke Google Drive,
          * pengambilan data admin, dan pembaruan status ke Google Sheets & Drive.
          */
-        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwMHvkF9POEejaW1H_HX3DGfzWyFh-pUcMs2dbbaD2c4FjH7wxxABv3okShEPTAvPfd/exec";
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbx7AgilH_Q7sipRYx5ici5gT5Rijt9KYRuPHjyC7DmukLTEpebucTnv2AHgj7POqpdv/exec";
 
         /** PIN akses untuk membuka Mode Administrator (?mode=admin). */
         const ADMIN_PIN = '123456';
@@ -656,6 +656,7 @@ function doPost(e) {
             raw.fileUrl ||
             raw.buktiUrl ||
             raw.proofUrl ||
+            raw.linkBukti ||
             raw.url ||
             '';
           const initialProof =
@@ -690,6 +691,17 @@ function doPost(e) {
                   }
                 : undefined;
 
+          const rawNominal = raw.nominal ?? raw.nominalKlaim;
+          const numericNominal = Number(rawNominal);
+          const safeNominal =
+            typeof rawNominal === 'number'
+              ? Number.isFinite(rawNominal)
+                ? rawNominal
+                : 0
+              : Number.isFinite(numericNominal)
+                ? numericNominal
+                : parseRupiahInput(rawNominal);
+
           return {
             ...raw,
             id: String(raw.id || ticket),
@@ -705,7 +717,7 @@ function doPost(e) {
             namaBank: String(raw.namaBank || ''),
             nomorRekening: String(raw.noRekening ?? raw.nomorRekening ?? ''),
             namaPemilikRekening: String(raw.namaPemilik || raw.namaPemilikRekening || ''),
-            nominalKlaim: Number(raw.nominal ?? raw.nominalKlaim) || 0,
+            nominalKlaim: safeNominal,
             alasanKlaim: String(raw.alasan || raw.alasanKlaim || ''),
             buktiTransferSebelumnya: initialProof,
             buktiTransferPengembalian: refundProof,

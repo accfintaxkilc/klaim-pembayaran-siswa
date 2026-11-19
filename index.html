@@ -931,13 +931,19 @@ function doPost(e) {
             throw new Error(res.error || res.message || 'Google Apps Script gagal memuat daftar klaim.');
           }
           if (Array.isArray(res && res.data)) {
-            return res.data.map(normalizeClaimRecord);
+            return res.data
+              .map(normalizeClaimRecord)
+              .filter((item) => item.status !== 'Ditolak');
           }
           if (Array.isArray(res && res.claims)) {
-            return res.claims.map(normalizeClaimRecord);
+            return res.claims
+              .map(normalizeClaimRecord)
+              .filter((item) => item.status !== 'Ditolak');
           }
           if (Array.isArray(res)) {
-            return res.map(normalizeClaimRecord);
+            return res
+              .map(normalizeClaimRecord)
+              .filter((item) => item.status !== 'Ditolak');
           }
           throw new Error('Format respons Google Apps Script tidak valid (array data tidak ditemukan).');
         }
@@ -1008,6 +1014,15 @@ function doPost(e) {
         }
 
         async function updateClaimStatus(ticketNumber, status, currentClaim) {
+          if (
+            currentClaim &&
+            currentClaim.status === 'Selesai / Ditransfer' &&
+            status !== 'Selesai / Ditransfer'
+          ) {
+            throw new Error(
+              'Status klaim yang sudah Selesai / Ditransfer dikunci dan tidak dapat diubah lagi.',
+            );
+          }
           const updatedAt = new Date().toISOString();
 
           const result = await postToGas({
@@ -1036,7 +1051,9 @@ function doPost(e) {
             sendToPhone = true,
           } = params;
           const nextStatus =
-            markAsTransferred === false ? claim.status : 'Selesai / Ditransfer';
+            claim.status === 'Selesai / Ditransfer' || markAsTransferred !== false
+              ? 'Selesai / Ditransfer'
+              : claim.status;
           const tujuanNotifikasi =
             sendToGroup && sendToPhone ? 'keduanya' : sendToGroup ? 'grup' : 'ponsel';
 
@@ -1898,6 +1915,7 @@ function doPost(e) {
                 STATUS_SELECT_STYLES[claim.status] ||
                 'border-[#8E1616]/20 bg-white text-[#3D0C0C]';
               const isUpdating = state.updatingTicket === claim.ticketNumber;
+              const isLockedTransferred = claim.status === 'Selesai / Ditransfer';
               return `
                 <tr class="hover:bg-[#FEF9F9]/80 transition-colors">
                   <td class="px-2.5 py-4 align-top whitespace-nowrap">
@@ -1963,12 +1981,13 @@ function doPost(e) {
                       data-action="status-change"
                       data-ticket="${escapeHtml(claim.ticketNumber)}"
                       aria-label="Status persetujuan ${escapeHtml(claim.ticketNumber)}"
-                      ${isUpdating ? 'disabled' : ''}
-                      class="w-36 rounded-lg border px-2 py-1.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#8E1616]/20 cursor-pointer ${statusStyle}"
+                      ${isUpdating || isLockedTransferred ? 'disabled' : ''}
+                      ${isLockedTransferred ? 'aria-disabled="true" title="Status sudah Selesai / Ditransfer dan dikunci"' : ''}
+                      class="w-36 rounded-lg border px-2 py-1.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#8E1616]/20 ${isLockedTransferred ? 'cursor-not-allowed disabled:opacity-100' : 'cursor-pointer'} ${statusStyle}"
                     >
                       ${CLAIM_STATUS_OPTIONS.map(
                         (opt) =>
-                          `<option value="${escapeHtml(opt.value)}" ${claim.status === opt.value ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`,
+                          `<option value="${escapeHtml(opt.value)}" ${claim.status === opt.value ? 'selected' : ''} ${isLockedTransferred && opt.value !== 'Selesai / Ditransfer' ? 'disabled' : ''}>${escapeHtml(opt.label)}</option>`,
                       ).join('')}
                     </select>
                   </td>
@@ -2026,7 +2045,13 @@ function doPost(e) {
             state.statusFilter,
             state.branchFilter,
           );
-          const statusTabs = ['Semua', ...CLAIM_STATUS_OPTIONS.map((s) => s.value)];
+          const statusTabs = [
+            'Semua',
+            ...CLAIM_STATUS_OPTIONS.filter((s) => s.value !== 'Ditolak').map((s) => s.value),
+          ];
+          if (state.statusFilter === 'Ditolak') {
+            state.statusFilter = 'Semua';
+          }
 
           return `
             <div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8 space-y-8">
@@ -2931,14 +2956,25 @@ function doPost(e) {
               const ticket = sel.getAttribute('data-ticket');
               const nextStatus = sel.value;
               const currentClaim = state.claims.find((c) => c.ticketNumber === ticket);
+              if (currentClaim && currentClaim.status === 'Selesai / Ditransfer') {
+                sel.value = 'Selesai / Ditransfer';
+                return;
+              }
               state.actionError = null;
               state.updatingTicket = ticket;
               render();
               try {
                 const updated = await updateClaimStatus(ticket, nextStatus, currentClaim);
-                state.claims = state.claims.map((item) =>
-                  item.ticketNumber === ticket ? updated : item,
-                );
+                if (updated.status === 'Ditolak') {
+                  state.claims = state.claims.filter((item) => item.ticketNumber !== ticket);
+                  if (state.previewClaim && state.previewClaim.ticketNumber === ticket) {
+                    state.previewClaim = null;
+                  }
+                } else {
+                  state.claims = state.claims.map((item) =>
+                    item.ticketNumber === ticket ? updated : item,
+                  );
+                }
               } catch (err) {
                 state.actionError =
                   err instanceof Error ? err.message : 'Gagal memperbarui status pengajuan.';

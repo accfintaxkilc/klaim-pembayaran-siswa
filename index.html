@@ -930,22 +930,41 @@ function doPost(e) {
           if (res && (res.ok === false || res.success === false || res.status === 'error')) {
             throw new Error(res.error || res.message || 'Google Apps Script gagal memuat daftar klaim.');
           }
-          if (Array.isArray(res && res.data)) {
-            return res.data
-              .map(normalizeClaimRecord)
-              .filter((item) => item.status !== 'Ditolak');
+          const rawList = Array.isArray(res && res.data)
+            ? res.data
+            : Array.isArray(res && res.claims)
+              ? res.claims
+              : Array.isArray(res)
+                ? res
+                : null;
+          if (!rawList) {
+            throw new Error(
+              'Format respons Google Apps Script tidak valid (array data tidak ditemukan).',
+            );
           }
-          if (Array.isArray(res && res.claims)) {
-            return res.claims
-              .map(normalizeClaimRecord)
-              .filter((item) => item.status !== 'Ditolak');
-          }
-          if (Array.isArray(res)) {
-            return res
-              .map(normalizeClaimRecord)
-              .filter((item) => item.status !== 'Ditolak');
-          }
-          throw new Error('Format respons Google Apps Script tidak valid (array data tidak ditemukan).');
+
+          const normalized = rawList.map(normalizeClaimRecord);
+          const rejectedTickets = new Set(
+            normalized
+              .filter((item) => item.status === 'Ditolak' && item.ticketNumber)
+              .map((item) => item.ticketNumber),
+          );
+
+          const seenTickets = new Set();
+          return normalized.filter((item) => {
+            const isEmptyGhostRow =
+              !String(item.namaSiswa || '').trim() &&
+              !String(item.nomorRegistrasi || '').trim() &&
+              (!Number.isFinite(item.nominalKlaim) || item.nominalKlaim <= 0);
+            if (isEmptyGhostRow) return false;
+            if (item.status === 'Ditolak') return false;
+            if (item.ticketNumber && rejectedTickets.has(item.ticketNumber)) return false;
+            if (item.ticketNumber) {
+              if (seenTickets.has(item.ticketNumber)) return false;
+              seenTickets.add(item.ticketNumber);
+            }
+            return true;
+          });
         }
 
         async function submitClaim(input) {
@@ -1057,38 +1076,21 @@ function doPost(e) {
           const tujuanNotifikasi =
             sendToGroup && sendToPhone ? 'keduanya' : sendToGroup ? 'grup' : 'ponsel';
 
-          const result = await postToGas({
-            action: 'uploadRefundProof',
-            ticketId: claim.ticketNumber,
-            newStatus: markAsTransferred === false ? undefined : 'Selesai / Ditransfer',
-            fileData: extractPureBase64(refundProof.dataUrl),
-            fileName: refundProof.name,
-            mimeType: refundProof.mimeType || 'application/octet-stream',
-            refundProof,
-            phoneNormalized: sendToPhone ? normalizePhoneToWa(claim.nomorPonsel) : '',
-            sendToGroup,
-            sendToPhone,
-            groupUrl: WHATSAPP_GROUP_URL,
-            message,
-            note: note || '',
-            updatedAt: nowIso,
-          });
-
-          if (result && result.claim) {
-            return normalizeClaimRecord(result.claim);
+          if (nextStatus === 'Selesai / Ditransfer' && claim.status !== 'Selesai / Ditransfer') {
+            await postToGas({
+              action: 'updateStatus',
+              ticketId: claim.ticketNumber,
+              newStatus: 'Selesai / Ditransfer',
+            });
           }
-
-          const proofUrl = (result && result.refundProofUrl) || refundProof.remoteUrl;
-          const finalMessage = (result && result.finalMessage) || message;
 
           return {
             ...claim,
             buktiTransferPengembalian: {
               ...refundProof,
-              remoteUrl: proofUrl,
             },
             catatanPengembalian: (note || '').trim() || claim.catatanPengembalian,
-            pesanNotifikasiTerkirim: finalMessage,
+            pesanNotifikasiTerkirim: message,
             tujuanNotifikasi,
             notifikasiTerkirimAt: nowIso,
             status: nextStatus,

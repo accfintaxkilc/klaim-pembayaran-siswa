@@ -21,9 +21,3730 @@
       href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap"
       rel="stylesheet"
     />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['"Plus Jakarta Sans"', '-apple-system', 'BlinkMacSystemFont', '"Segoe UI"', 'sans-serif'],
+              mono: ['"JetBrains Mono"', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      :root {
+        --bg: #FEF9F9;
+        --ink: #3D0C0C;
+        --accent: #8E1616;
+        --surface: #FFFFFF;
+        --muted: #8C5E5E;
+      }
+
+      html {
+        font-family: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background-color: var(--bg);
+        color: var(--ink);
+        color-scheme: light;
+      }
+
+      .tabular-nums {
+        font-variant-numeric: tabular-nums;
+      }
+
+      @media print {
+        .no-print {
+          display: none !important;
+        }
+        body {
+          background: #ffffff !important;
+        }
+      }
+    </style>
   </head>
   <body class="bg-[#FEF9F9] text-[#3D0C0C] antialiased selection:bg-[#8E1616] selection:text-white">
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <div id="app" class="min-h-screen flex flex-col bg-[#FEF9F9] text-[#3D0C0C]"></div>
+
+    <script>
+      (() => {
+        'use strict';
+
+        /**
+         * =====================================================================
+         * KONFIGURASI GOOGLE APPS SCRIPT & PORTAL ADMINISTRATOR
+         * =====================================================================
+         * Tempelkan URL Web App hasil deploy Google Apps Script (berakhiran /exec)
+         * pada konstanta WEB_APP_URL di bawah ini agar seluruh pengajuan klaim,
+         * unggah bukti transfer ke Google Drive, dan pembaruan status langsung
+         * terhubung ke Google Sheets & Google Drive Anda.
+         *
+         * Jika WEB_APP_URL masih kosong (""), aplikasi berjalan dalam mode
+         * penyimpanan lokal browser (IndexedDB / localStorage) agar dapat
+         * langsung digunakan dan diuji coba.
+         */
+        const WEB_APP_URL = '';
+
+        /** PIN akses untuk membuka Mode Administrator. */
+        const ADMIN_PIN = '123456';
+
+        /** Tautan Grup WhatsApp tujuan pengiriman pesan konfirmasi & bukti. */
+        const WHATSAPP_GROUP_URL =
+          'https://chat.whatsapp.com/KFY2HJp5UPo3UG4Zfh5QGz?s=cl&p=i&iam=2';
+
+        const BRANCH_OPTIONS = [
+          'Pare - Offline',
+          'Pare - Online',
+          'Bogor',
+          'Yogya - Mantrijeron',
+          'Yogya - Gondokusuman',
+          'Lampung',
+          'Medan',
+          'Makassar - Panakukang',
+          'Makassar - Tamalanrea',
+          'Bekasi',
+          'Semarang',
+          'Surabaya',
+          'Solo',
+        ];
+
+        const BANK_OPTIONS = [
+          'BCA',
+          'BRI',
+          'BNI',
+          'Mandiri',
+          'BSI (Bank Syariah Indonesia)',
+          'CIMB Niaga',
+          'Permata Bank',
+          'Bank Danamon',
+          'BTN',
+          'Bank Jago',
+          'SeaBank',
+          'OCBC NISP',
+          'Bank Mega',
+          'Bank Lainnya',
+        ];
+
+        const CLAIM_STATUS_OPTIONS = [
+          { value: 'Menunggu Verifikasi', label: 'Menunggu Verifikasi' },
+          { value: 'Verifikasi Admin', label: 'Verifikasi Admin' },
+          { value: 'Disetujui', label: 'Disetujui' },
+          { value: 'Selesai / Ditransfer', label: 'Selesai / Ditransfer' },
+          { value: 'Ditolak', label: 'Ditolak' },
+        ];
+
+        const STATUS_SELECT_STYLES = {
+          'Menunggu Verifikasi': 'border-amber-300 bg-amber-50 text-amber-900',
+          'Verifikasi Admin': 'border-sky-300 bg-sky-50 text-sky-900',
+          Disetujui: 'border-green-200 bg-green-50 text-green-800',
+          'Selesai / Ditransfer': 'border-[#24664A] bg-[#2E7D5B] text-white font-bold',
+          Ditolak: 'border-red-300 bg-red-100/70 text-red-900',
+        };
+
+        const ALLOWED_PROOF_MIME_TYPES = ['image/jpeg', 'image/png', 'application/pdf'];
+        const MAX_PROOF_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB
+
+        const DB_NAME = 'student_overpayment_claims_db';
+        const DB_VERSION = 1;
+        const STORE_NAME = 'claims';
+        const LEGACY_STORAGE_KEY = 'student_overpayment_claims_v1';
+
+        const GOOGLE_APPS_SCRIPT_TEMPLATE = `// Salin kode ini ke Google Apps Script (Extensions > Apps Script di Google Sheets)
+const FOLDER_ID = 'GANTI_DENGAN_ID_FOLDER_GOOGLE_DRIVE';
+const SHEET_NAME = 'KlaimPembayaran';
+// Opsional: isi URL & Token Gateway WhatsApp (mis. Fonnte/Wablas) untuk kirim lampiran & pesan otomatis dari server GAS
+const WA_GATEWAY_URL = '';
+const WA_GATEWAY_TOKEN = '';
+// ID Grup WhatsApp (format JID gateway mis. 120363xxxxxx@g.us) untuk grup: ${WHATSAPP_GROUP_URL}
+const WA_GROUP_ID = '';
+
+function getOrCreateSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAME);
+    sheet.appendRow([
+      'ID', 'Nomor Tiket', 'Tanggal Pengajuan', 'Diperbarui',
+      'Nama Siswa', 'Nomor Registrasi', 'Nomor Ponsel', 'Cabang',
+      'Program Kursus', 'Nama Bank', 'Nomor Rekening', 'Pemilik Rekening',
+      'Nominal Klaim', 'Alasan Klaim', 'Status',
+      'URL Bukti Sebelumnya', 'Nama Bukti Sebelumnya', 'Mime Bukti Sebelumnya',
+      'URL Bukti Pengembalian', 'Nama Bukti Pengembalian', 'Mime Bukti Pengembalian',
+      'Catatan Pengembalian', 'Waktu Notifikasi', 'Periode'
+    ]);
+  }
+  return sheet;
+}
+
+function saveBase64ToDrive_(proof, prefix) {
+  if (!proof || !proof.dataUrl) return { viewUrl: '', downloadUrl: '' };
+  const parts = proof.dataUrl.split(',');
+  const base64Data = parts.length > 1 ? parts[1] : parts[0];
+  const decoded = Utilities.base64Decode(base64Data);
+  const blob = Utilities.newBlob(decoded, proof.mimeType || 'application/octet-stream', prefix + '_' + proof.name);
+  const folder = DriveApp.getFolderById(FOLDER_ID);
+  const file = folder.createFile(blob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  const fileId = file.getId();
+  return {
+    viewUrl: file.getUrl(),
+    downloadUrl: 'https://drive.google.com/uc?export=download&id=' + fileId
+  };
+}
+
+function sendWhatsAppFromGas_(phone, message, mediaUrl) {
+  if (!WA_GATEWAY_URL || !phone) return;
+  const payload = { target: phone, message: message };
+  if (mediaUrl) {
+    payload.url = mediaUrl;
+  }
+  UrlFetchApp.fetch(WA_GATEWAY_URL, {
+    method: 'post',
+    headers: { Authorization: WA_GATEWAY_TOKEN },
+    payload: payload,
+    muteHttpExceptions: true
+  });
+}
+
+function doGet(e) {
+  const sheet = getOrCreateSheet_();
+  const rows = sheet.getDataRange().getValues();
+  const claims = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r[1]) continue;
+    claims.push({
+      id: r[0],
+      ticketNumber: r[1],
+      createdAt: r[2],
+      updatedAt: r[3],
+      namaSiswa: r[4],
+      nomorRegistrasi: String(r[5]),
+      nomorPonsel: String(r[6]),
+      cabang: r[7],
+      programKursus: r[8],
+      namaBank: r[9],
+      nomorRekening: String(r[10]),
+      namaPemilikRekening: r[11],
+      nominalKlaim: Number(r[12]) || 0,
+      alasanKlaim: r[13],
+      status: r[14],
+      buktiTransferSebelumnya: {
+        name: r[16] || 'bukti',
+        mimeType: r[17] || 'image/png',
+        size: 0,
+        dataUrl: r[15],
+        remoteUrl: r[15]
+      },
+      buktiTransferPengembalian: r[18] ? {
+        name: r[19] || 'refund',
+        mimeType: r[20] || 'image/png',
+        size: 0,
+        dataUrl: r[18],
+        remoteUrl: r[18]
+      } : undefined,
+      catatanPengembalian: r[21] || '',
+      notifikasiTerkirimAt: r[22] || '',
+      periode: r[23] || ''
+    });
+  }
+  return ContentService
+    .createTextOutput(JSON.stringify({ ok: true, claims: claims.reverse() }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  const payload = JSON.parse(e.postData.contents);
+  const sheet = getOrCreateSheet_();
+
+  if (payload.action === 'submitClaim') {
+    const c = payload.claim;
+    const saved = saveBase64ToDrive_(c.buktiTransferSebelumnya, c.ticketNumber + '_awal');
+    sheet.appendRow([
+      c.id, c.ticketNumber, c.createdAt, c.updatedAt,
+      c.namaSiswa, c.nomorRegistrasi, c.nomorPonsel, c.cabang,
+      c.programKursus, c.namaBank, c.nomorRekening, c.namaPemilikRekening,
+      c.nominalKlaim, c.alasanKlaim, c.status,
+      saved.viewUrl, c.buktiTransferSebelumnya.name, c.buktiTransferSebelumnya.mimeType || 'image/png',
+      '', '', '', '', '', c.periode || ''
+    ]);
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, proofUrl: saved.viewUrl }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const rows = sheet.getDataRange().getValues();
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][1] === payload.ticketNumber) {
+      const rowNum = i + 1;
+      if (payload.action === 'updateStatus') {
+        sheet.getRange(rowNum, 4).setValue(payload.updatedAt);
+        sheet.getRange(rowNum, 15).setValue(payload.status);
+        return ContentService
+          .createTextOutput(JSON.stringify({ ok: true }))
+          .setMimeType(ContentService.MimeType.JSON);
+      } else if (payload.action === 'uploadRefundProof') {
+        const savedRefund = saveBase64ToDrive_(payload.refundProof, payload.ticketNumber + '_refund');
+        const finalMessage = payload.message;
+        sheet.getRange(rowNum, 4).setValue(payload.updatedAt);
+        if (payload.status) sheet.getRange(rowNum, 15).setValue(payload.status);
+        sheet.getRange(rowNum, 19).setValue(savedRefund.viewUrl);
+        sheet.getRange(rowNum, 20).setValue(payload.refundProof.name);
+        sheet.getRange(rowNum, 21).setValue(payload.refundProof.mimeType || 'image/png');
+        sheet.getRange(rowNum, 22).setValue(payload.note || '');
+        sheet.getRange(rowNum, 23).setValue(payload.updatedAt);
+        if (payload.sendToPhone !== false && payload.phoneNormalized) {
+          sendWhatsAppFromGas_(payload.phoneNormalized, finalMessage, savedRefund.downloadUrl);
+        }
+        if (payload.sendToGroup !== false && WA_GROUP_ID) {
+          sendWhatsAppFromGas_(WA_GROUP_ID, finalMessage, savedRefund.downloadUrl);
+        }
+        return ContentService
+          .createTextOutput(JSON.stringify({
+            ok: true,
+            refundProofUrl: savedRefund.viewUrl,
+            downloadUrl: savedRefund.downloadUrl,
+            finalMessage: finalMessage
+          }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+      break;
+    }
+  }
+
+  return ContentService
+    .createTextOutput(JSON.stringify({ ok: false, error: 'Tiket tidak ditemukan di Google Sheets.' }))
+    .setMimeType(ContentService.MimeType.JSON);
+}`;
+
+        // ===================================================================
+        // SVG ICON SYSTEM (Lucide paths)
+        // ===================================================================
+        const ICON_PATHS = {
+          lock: '<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+          'log-out': '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/>',
+          send: '<path d="M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z"/><path d="m21.854 2.147-10.94 10.939"/>',
+          upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/>',
+          'trash-2': '<path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/>',
+          'file-text': '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>',
+          'check-circle-2': '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+          'alert-circle': '<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>',
+          copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+          check: '<path d="M20 6 9 17l-5-5"/>',
+          printer: '<path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"/><rect x="6" y="14" width="12" height="8" rx="1"/>',
+          'plus-circle': '<circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/>',
+          'key-round': '<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>',
+          eye: '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
+          'eye-off': '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/>',
+          'arrow-left': '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>',
+          settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+          'refresh-cw': '<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+          download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/>',
+          search: '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+          x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+          'external-link': '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+          'link-2': '<path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 1 1 0 10h-2"/><line x1="8" x2="16" y1="12" y2="12"/>',
+          'share-2': '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
+          users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+        };
+
+        function icon(name, classes = 'h-4 w-4') {
+          const paths = ICON_PATHS[name] || '';
+          return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${classes}" aria-hidden="true">${paths}</svg>`;
+        }
+
+        // ===================================================================
+        // HELPERS & UTILITIES
+        // ===================================================================
+        function escapeHtml(value) {
+          return String(value ?? '')
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        }
+
+        function formatRupiah(amount) {
+          const safe = Number.isFinite(amount) ? Math.max(0, Math.round(amount)) : 0;
+          return `Rp ${safe.toLocaleString('id-ID')}`;
+        }
+
+        function parseRupiahInput(raw) {
+          const digits = String(raw ?? '').replace(/[^0-9]/g, '');
+          if (!digits) return 0;
+          const parsed = Number.parseInt(digits, 10);
+          return Number.isFinite(parsed) ? parsed : 0;
+        }
+
+        function normalizePhoneToWa(phone) {
+          const digits = String(phone ?? '').replace(/[^0-9]/g, '');
+          if (!digits) return '';
+          if (digits.startsWith('62')) return digits;
+          if (digits.startsWith('0')) return `62${digits.slice(1)}`;
+          if (digits.startsWith('8')) return `62${digits}`;
+          return digits;
+        }
+
+        function generateTicketNumber(date = new Date(), randomSuffix) {
+          const yyyy = date.getFullYear();
+          const mm = String(date.getMonth() + 1).padStart(2, '0');
+          const dd = String(date.getDate()).padStart(2, '0');
+          const rand =
+            randomSuffix !== undefined
+              ? String(randomSuffix).padStart(4, '0').slice(0, 4)
+              : String(Math.floor(1000 + Math.random() * 9000));
+          return `KLM-${yyyy}${mm}${dd}-${rand}`;
+        }
+
+        function formatIndonesianDateTime(isoString) {
+          const parsed = new Date(isoString);
+          if (Number.isNaN(parsed.getTime())) return isoString || '';
+          return new Intl.DateTimeFormat('id-ID', {
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          }).format(parsed);
+        }
+
+        function formatFileSize(bytes) {
+          if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+          if (bytes < 1024) return `${bytes} B`;
+          if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+          return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+        }
+
+        function validateClaimForm(input) {
+          const errors = {};
+          if (!input.namaSiswa.trim()) {
+            errors.namaSiswa = 'Nama lengkap siswa wajib diisi.';
+          } else if (input.namaSiswa.trim().length < 3) {
+            errors.namaSiswa = 'Nama lengkap minimal 3 karakter.';
+          }
+
+          if (!input.nomorRegistrasi.trim()) {
+            errors.nomorRegistrasi = 'Nomor registrasi wajib diisi.';
+          }
+
+          const phoneDigits = input.nomorPonsel.replace(/[^0-9]/g, '');
+          if (!phoneDigits) {
+            errors.nomorPonsel = 'Nomor ponsel wajib diisi.';
+          } else if (phoneDigits.length < 9 || phoneDigits.length > 15) {
+            errors.nomorPonsel = 'Masukkan nomor ponsel aktif yang valid (9–15 digit).';
+          }
+
+          if (!input.cabang.trim()) {
+            errors.cabang = 'Pilih cabang kursus terlebih dahulu.';
+          }
+
+          if (!input.programKursus.trim()) {
+            errors.programKursus = 'Program kursus wajib diisi.';
+          }
+
+          if (!input.periode.trim()) {
+            errors.periode = 'Periode wajib diisi.';
+          }
+
+          if (!input.namaBank.trim()) {
+            errors.namaBank = 'Nama bank tujuan wajib diisi.';
+          }
+
+          const rekDigits = input.nomorRekening.replace(/[^0-9]/g, '');
+          if (!rekDigits) {
+            errors.nomorRekening = 'Nomor rekening tujuan wajib diisi.';
+          } else if (rekDigits.length < 5) {
+            errors.nomorRekening = 'Nomor rekening minimal 5 digit angka.';
+          }
+
+          if (!input.namaPemilikRekening.trim()) {
+            errors.namaPemilikRekening = 'Nama pemilik rekening wajib diisi.';
+          }
+
+          if (!Number.isFinite(input.nominalKlaim) || input.nominalKlaim <= 0) {
+            errors.nominalKlaim = 'Nominal klaim kelebihan harus lebih besar dari Rp 0.';
+          }
+
+          if (!input.buktiTransferSebelumnya) {
+            errors.buktiTransferSebelumnya = 'Unggah bukti transfer sebelumnya (JPG, PNG, atau PDF).';
+          }
+
+          if (!input.alasanKlaim.trim()) {
+            errors.alasanKlaim = 'Keterangan alasan pengajuan klaim wajib diisi.';
+          } else if (input.alasanKlaim.trim().length < 10) {
+            errors.alasanKlaim = 'Jelaskan alasan pengajuan klaim minimal 10 karakter.';
+          }
+
+          return errors;
+        }
+
+        function computeClaimStats(claims) {
+          return claims.reduce(
+            (acc, item) => {
+              acc.totalKlaim += 1;
+              acc.totalNominal += Number.isFinite(item.nominalKlaim) ? item.nominalKlaim : 0;
+
+              if (item.status === 'Menunggu Verifikasi') {
+                acc.menungguVerifikasi += 1;
+              } else if (item.status === 'Verifikasi Admin') {
+                acc.verifikasiAdmin += 1;
+              } else if (item.status === 'Disetujui') {
+                acc.disetujui += 1;
+              } else if (item.status === 'Selesai / Ditransfer') {
+                acc.selesaiDitransfer += 1;
+              } else if (item.status === 'Ditolak') {
+                acc.ditolak += 1;
+              }
+              return acc;
+            },
+            {
+              totalKlaim: 0,
+              menungguVerifikasi: 0,
+              verifikasiAdmin: 0,
+              disetujui: 0,
+              selesaiDitransfer: 0,
+              ditolak: 0,
+              totalNominal: 0,
+            },
+          );
+        }
+
+        function filterClaims(claims, query, statusFilter, branchFilter) {
+          const q = String(query ?? '').trim().toLowerCase();
+          return claims.filter((item) => {
+            if (statusFilter !== 'Semua' && item.status !== statusFilter) {
+              return false;
+            }
+            if (branchFilter !== 'Semua' && item.cabang !== branchFilter) {
+              return false;
+            }
+            if (!q) return true;
+
+            const haystack = [
+              item.ticketNumber,
+              item.namaSiswa,
+              item.nomorRegistrasi,
+              item.nomorPonsel,
+              item.cabang,
+              item.programKursus,
+              item.periode || '',
+              item.namaBank,
+              item.nomorRekening,
+              item.namaPemilikRekening,
+              item.status,
+            ]
+              .join(' ')
+              .toLowerCase();
+
+            return haystack.includes(q);
+          });
+        }
+
+        function escapeCsvCell(value) {
+          const str = String(value ?? '');
+          if (/[",\n\r]/.test(str)) {
+            return `"${str.replace(/"/g, '""')}"`;
+          }
+          return str;
+        }
+
+        function buildClaimsCsv(claims) {
+          const headers = [
+            'Nomor Tiket',
+            'Tanggal Pengajuan',
+            'Nama Lengkap Siswa',
+            'Nomor Registrasi',
+            'Nomor Ponsel',
+            'Cabang',
+            'Program Kursus',
+            'Periode',
+            'Nama Bank Tujuan',
+            'Nomor Rekening',
+            'Nama Pemilik Rekening',
+            'Nominal Klaim (IDR)',
+            'Alasan Pengajuan',
+            'Status',
+            'Nama File Bukti Sebelumnya',
+            'Nama File Bukti Pengembalian',
+            'Waktu Notifikasi Terkirim',
+          ];
+
+          const rows = claims.map((c) => [
+            c.ticketNumber,
+            formatIndonesianDateTime(c.createdAt),
+            c.namaSiswa,
+            c.nomorRegistrasi,
+            c.nomorPonsel,
+            c.cabang,
+            c.programKursus,
+            c.periode || '',
+            c.namaBank,
+            c.nomorRekening,
+            c.namaPemilikRekening,
+            c.nominalKlaim,
+            c.alasanKlaim,
+            c.status,
+            c.buktiTransferSebelumnya ? c.buktiTransferSebelumnya.name : '',
+            c.buktiTransferPengembalian ? c.buktiTransferPengembalian.name : '',
+            c.notifikasiTerkirimAt ? formatIndonesianDateTime(c.notifikasiTerkirimAt) : '',
+          ]);
+
+          const lines = [
+            headers.map(escapeCsvCell).join(','),
+            ...rows.map((r) => r.map(escapeCsvCell).join(',')),
+          ];
+
+          return `\uFEFF${lines.join('\r\n')}`;
+        }
+
+        function buildWhatsAppRefundMessage(claim, _refundProofName, refundNote) {
+          const lines = [
+            `*KONFIRMASI PENGEMBALIAN KLAIM SISWA*`,
+            `Kampung Inggris Language Center`,
+            '',
+            `• Nama Siswa: *${claim.namaSiswa}*`,
+            `• No. Tiket: *${claim.ticketNumber}*`,
+            `• No. Registrasi: ${claim.nomorRegistrasi}`,
+            `• No. Ponsel: ${claim.nomorPonsel}`,
+            `• Cabang / Program: ${claim.cabang} — ${claim.programKursus}`,
+            `• Periode: ${(claim.periode || '').trim() || '-'}`,
+            `• Rekening Tujuan: ${claim.namaBank} - ${claim.nomorRekening} (a.n. ${claim.namaPemilikRekening})`,
+            `• Nominal Klaim: *${formatRupiah(claim.nominalKlaim)}*`,
+          ];
+
+          if (refundNote && refundNote.trim()) {
+            lines.push(`• Catatan Finance: ${refundNote.trim()}`);
+          }
+
+          lines.push('', 'Status: *SELESAI / DITRANSFER*. Silakan periksa mutasi rekening. Terima kasih.');
+          return lines.join('\n');
+        }
+
+        function extractGoogleDriveFileId(url) {
+          if (!url) return null;
+          const matchPath = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+          if (matchPath && matchPath[1]) return matchPath[1];
+          const matchQuery = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+          if (matchQuery && matchQuery[1]) return matchQuery[1];
+          return null;
+        }
+
+        function getDriveRenderUrl(url, mimeType) {
+          const fileId = extractGoogleDriveFileId(url);
+          if (!fileId) return url;
+          if (mimeType === 'application/pdf') {
+            return `https://drive.google.com/file/d/${fileId}/preview`;
+          }
+          return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1600`;
+        }
+
+        function buildWhatsAppUrl(phone, message) {
+          const normalized = normalizePhoneToWa(phone);
+          return `https://wa.me/${normalized}?text=${encodeURIComponent(message)}`;
+        }
+
+        function buildWhatsAppShareTextUrl(message) {
+          return `https://wa.me/?text=${encodeURIComponent(message)}`;
+        }
+
+        // ===================================================================
+        // SEED DATA & STORAGE (IndexedDB + localStorage fallback + GAS)
+        // ===================================================================
+        function createSampleReceiptSvgDataUrl(opts) {
+          const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="560" height="360" viewBox="0 0 560 360">
+            <rect width="560" height="360" fill="#FEF9F9"/>
+            <rect x="24" y="24" width="512" height="312" rx="16" fill="#FFFFFF" stroke="#8E1616" stroke-opacity="0.18" stroke-width="1.5"/>
+            <rect x="24" y="24" width="512" height="60" rx="16" fill="#8E1616"/>
+            <text x="48" y="61" font-family="sans-serif" font-size="18" font-weight="700" fill="#FFFFFF">BUKTI TRANSFER ELEKTRONIK · ${opts.bank}</text>
+            <text x="48" y="122" font-family="sans-serif" font-size="13" fill="#8C5E5E">Status Transaksi</text>
+            <text x="48" y="144" font-family="sans-serif" font-size="16" font-weight="700" fill="#16A34A">BERHASIL</text>
+            <text x="300" y="122" font-family="sans-serif" font-size="13" fill="#8C5E5E">Tanggal &amp; Waktu</text>
+            <text x="300" y="144" font-family="sans-serif" font-size="14" font-weight="600" fill="#3D0C0C">${opts.date}</text>
+            <line x1="48" y1="168" x2="512" y2="168" stroke="#8E1616" stroke-opacity="0.12"/>
+            <text x="48" y="198" font-family="sans-serif" font-size="13" fill="#8C5E5E">Pengirim / Rekening Sumber</text>
+            <text x="48" y="220" font-family="sans-serif" font-size="15" font-weight="600" fill="#3D0C0C">${opts.sender}</text>
+            <text x="48" y="254" font-family="sans-serif" font-size="13" fill="#8C5E5E">Nominal Transfer</text>
+            <text x="48" y="282" font-family="monospace" font-size="22" font-weight="700" fill="#8E1616">${opts.amount}</text>
+            <text x="300" y="254" font-family="sans-serif" font-size="13" fill="#8C5E5E">Nomor Referensi</text>
+            <text x="300" y="280" font-family="monospace" font-size="14" font-weight="600" fill="#3D0C0C">${opts.ref}</text>
+          </svg>`;
+          return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+        }
+
+        const SEED_CLAIMS = [
+          {
+            id: 'seed-1',
+            ticketNumber: 'KLM-20261116-4812',
+            createdAt: '2026-11-16T03:15:00.000Z',
+            updatedAt: '2026-11-16T03:15:00.000Z',
+            namaSiswa: 'Nadia Kusuma Wardani',
+            nomorRegistrasi: '101010',
+            nomorPonsel: '081234567891',
+            cabang: 'Pare - Offline',
+            programKursus: 'IEP 1 Bulan Camp AC',
+            periode: '10/11/2026',
+            namaBank: 'BCA',
+            nomorRekening: '8820194421',
+            namaPemilikRekening: 'NADIA KUSUMA WARDANI',
+            nominalKlaim: 450000,
+            alasanKlaim:
+              'Terjadi transfer ganda untuk pelunasan biaya program IEP 1 Bulan Camp AC periode November.',
+            buktiTransferSebelumnya: {
+              name: 'struk-bca-nadia.svg',
+              mimeType: 'image/png',
+              size: 184200,
+              dataUrl: createSampleReceiptSvgDataUrl({
+                bank: 'BCA',
+                sender: 'NADIA KUSUMA WARDANI',
+                amount: 'Rp 2.450.000',
+                date: '16 Nov 2026, 09:40 WIB',
+                ref: 'TRF-20261116-8812',
+              }),
+            },
+            status: 'Menunggu Verifikasi',
+          },
+          {
+            id: 'seed-2',
+            ticketNumber: 'KLM-20261115-2194',
+            createdAt: '2026-11-15T07:20:00.000Z',
+            updatedAt: '2026-11-16T01:45:00.000Z',
+            namaSiswa: 'Fajar Ramadhan',
+            nomorRegistrasi: '102485',
+            nomorPonsel: '085699112233',
+            cabang: 'Yogya - Mantrijeron',
+            programKursus: 'TOEFL Scoring & Class 1 Bulan',
+            periode: '10/11/2026',
+            namaBank: 'Mandiri',
+            nomorRekening: '1370009182731',
+            namaPemilikRekening: 'FAJAR RAMADHAN',
+            nominalKlaim: 600000,
+            alasanKlaim:
+              'Pindah paket dari Camp VIP ke Non-Camp sehingga terdapat selisih kelebihan biaya akomodasi.',
+            buktiTransferSebelumnya: {
+              name: 'livin-mandiri-fajar.svg',
+              mimeType: 'image/png',
+              size: 215000,
+              dataUrl: createSampleReceiptSvgDataUrl({
+                bank: 'MANDIRI',
+                sender: 'FAJAR RAMADHAN',
+                amount: 'Rp 1.850.000',
+                date: '15 Nov 2026, 14:12 WIB',
+                ref: 'MDR-99201831',
+              }),
+            },
+            status: 'Disetujui',
+          },
+          {
+            id: 'seed-3',
+            ticketNumber: 'KLM-20261114-7730',
+            createdAt: '2026-11-14T04:00:00.000Z',
+            updatedAt: '2026-11-15T06:30:00.000Z',
+            namaSiswa: 'Siti Nurhaliza',
+            nomorRegistrasi: '100892',
+            nomorPonsel: '082188776655',
+            cabang: 'Makassar - Panakukang',
+            programKursus: 'English Master 2 Bulan',
+            periode: '01/11/2026',
+            namaBank: 'BRI',
+            nomorRekening: '003401009988501',
+            namaPemilikRekening: 'SITI NURHALIZA',
+            nominalKlaim: 350000,
+            alasanKlaim:
+              'Kelebihan nominal transfer karena tidak memasukkan kode promo diskon alumni saat pembayaran.',
+            buktiTransferSebelumnya: {
+              name: 'brimo-siti.svg',
+              mimeType: 'image/png',
+              size: 164500,
+              dataUrl: createSampleReceiptSvgDataUrl({
+                bank: 'BRI',
+                sender: 'SITI NURHALIZA',
+                amount: 'Rp 2.150.000',
+                date: '14 Nov 2026, 10:55 WIB',
+                ref: 'BRI-77482019',
+              }),
+            },
+            buktiTransferPengembalian: {
+              name: 'refund-bri-siti.svg',
+              mimeType: 'image/png',
+              size: 148000,
+              dataUrl: createSampleReceiptSvgDataUrl({
+                bank: 'BCA FINANCE',
+                sender: 'TIM FINANCE KLAIM',
+                amount: 'Rp 350.000',
+                date: '15 Nov 2026, 13:30 WIB',
+                ref: 'RFD-KLM-7730',
+              }),
+            },
+            catatanPengembalian: 'Dana refund telah ditransfer ke BRI a.n. SITI NURHALIZA.',
+            notifikasiTerkirimAt: '2026-11-15T06:31:00.000Z',
+            status: 'Selesai / Ditransfer',
+          },
+        ];
+
+        function openDb() {
+          return new Promise((resolve, reject) => {
+            if (typeof indexedDB === 'undefined') {
+              reject(new Error('IndexedDB tidak tersedia di lingkungan ini.'));
+              return;
+            }
+            const request = indexedDB.open(DB_NAME, DB_VERSION);
+            request.onupgradeneeded = () => {
+              const db = request.result;
+              if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: 'ticketNumber' });
+              }
+            };
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error || new Error('Gagal membuka IndexedDB.'));
+          });
+        }
+
+        function readAllFromStore(db) {
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const req = store.getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error || new Error('Gagal membaca data klaim.'));
+          });
+        }
+
+        function putAllToStore(db, records) {
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            const store = tx.objectStore(STORE_NAME);
+            for (const rec of records) {
+              store.put(rec);
+            }
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Gagal menyimpan data klaim.'));
+          });
+        }
+
+        function putOneToStore(db, record) {
+          return new Promise((resolve, reject) => {
+            const tx = db.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).put(record);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error || new Error('Gagal menyimpan berkas klaim.'));
+          });
+        }
+
+        function mergeMissingSeedFields(records, seedClaims) {
+          const seedByTicket = new Map(seedClaims.map((s) => [s.ticketNumber, s]));
+          let changed = false;
+          const merged = records.map((rec) => {
+            const seed = seedByTicket.get(rec.ticketNumber);
+            if (seed && !rec.periode && seed.periode) {
+              changed = true;
+              return { ...rec, periode: seed.periode };
+            }
+            return rec;
+          });
+          return { merged, changed };
+        }
+
+        async function getLocalClaims(seedClaims) {
+          try {
+            const db = await openDb();
+            let records = await readAllFromStore(db);
+
+            if (records.length === 0) {
+              let initial = seedClaims;
+              try {
+                const legacyRaw = localStorage.getItem(LEGACY_STORAGE_KEY);
+                if (legacyRaw) {
+                  const parsed = JSON.parse(legacyRaw);
+                  if (Array.isArray(parsed) && parsed.length > 0) {
+                    initial = parsed;
+                  }
+                }
+              } catch {
+                // Abaikan
+              }
+              const { merged } = mergeMissingSeedFields(initial, seedClaims);
+              await putAllToStore(db, merged);
+              records = merged;
+            } else {
+              const { merged, changed } = mergeMissingSeedFields(records, seedClaims);
+              if (changed) {
+                await putAllToStore(db, merged);
+                records = merged;
+              }
+            }
+
+            db.close();
+            return records.sort(
+              (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+            );
+          } catch {
+            try {
+              const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+              if (!raw) {
+                localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(seedClaims));
+                return seedClaims;
+              }
+              const parsed = JSON.parse(raw);
+              if (!Array.isArray(parsed)) return seedClaims;
+              const { merged } = mergeMissingSeedFields(parsed, seedClaims);
+              return merged;
+            } catch {
+              return seedClaims;
+            }
+          }
+        }
+
+        async function saveLocalClaimRecord(record, seedClaims) {
+          try {
+            const db = await openDb();
+            const existing = await readAllFromStore(db);
+            if (existing.length === 0) {
+              await putAllToStore(db, seedClaims);
+            }
+            await putOneToStore(db, record);
+            db.close();
+            return record;
+          } catch {
+            const existing = await getLocalClaims(seedClaims);
+            const exists = existing.some((c) => c.ticketNumber === record.ticketNumber);
+            const next = exists
+              ? existing.map((c) => (c.ticketNumber === record.ticketNumber ? record : c))
+              : [record, ...existing];
+            localStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(next));
+            return record;
+          }
+        }
+
+        function isGasConfigured() {
+          return WEB_APP_URL.trim().length > 0;
+        }
+
+        function fileToProofPayload(file) {
+          return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              resolve({
+                name: file.name,
+                mimeType: file.type || 'application/octet-stream',
+                size: file.size,
+                dataUrl: typeof reader.result === 'string' ? reader.result : '',
+              });
+            };
+            reader.onerror = () => reject(new Error('Gagal membaca berkas bukti transfer.'));
+            reader.readAsDataURL(file);
+          });
+        }
+
+        async function postToGas(payload) {
+          const response = await fetch(WEB_APP_URL, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'text/plain;charset=utf-8',
+            },
+            body: JSON.stringify(payload),
+          });
+          if (!response.ok) {
+            throw new Error(`Google Apps Script mengembalikan status ${response.status}.`);
+          }
+          const data = await response.json();
+          if (data && data.ok === false) {
+            throw new Error(data.error || 'Terjadi kesalahan pada Google Apps Script.');
+          }
+          return data;
+        }
+
+        async function fetchClaims() {
+          if (isGasConfigured()) {
+            const url = `${WEB_APP_URL}${WEB_APP_URL.includes('?') ? '&' : '?'}action=list`;
+            const response = await fetch(url, { method: 'GET' });
+            if (!response.ok) {
+              throw new Error(`Gagal memuat data dari Google Apps Script (${response.status}).`);
+            }
+            const data = await response.json();
+            if (Array.isArray(data && data.claims)) {
+              return data.claims;
+            }
+            if (Array.isArray(data)) {
+              return data;
+            }
+            throw new Error('Format respons Google Apps Script tidak valid.');
+          }
+          return getLocalClaims(SEED_CLAIMS);
+        }
+
+        async function submitClaim(input) {
+          if (!input.buktiTransferSebelumnya) {
+            throw new Error('Bukti transfer sebelumnya wajib dilampirkan.');
+          }
+
+          const now = new Date();
+          const ticketNumber = generateTicketNumber(now);
+          const id =
+            typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+              ? crypto.randomUUID()
+              : `claim-${Date.now()}`;
+
+          const record = {
+            id,
+            ticketNumber,
+            createdAt: now.toISOString(),
+            updatedAt: now.toISOString(),
+            namaSiswa: input.namaSiswa.trim(),
+            nomorRegistrasi: input.nomorRegistrasi.trim(),
+            nomorPonsel: input.nomorPonsel.trim(),
+            cabang: input.cabang.trim(),
+            programKursus: input.programKursus.trim(),
+            periode: input.periode.trim(),
+            namaBank: input.namaBank.trim(),
+            nomorRekening: input.nomorRekening.trim(),
+            namaPemilikRekening: input.namaPemilikRekening.trim().toUpperCase(),
+            nominalKlaim: input.nominalKlaim,
+            alasanKlaim: input.alasanKlaim.trim(),
+            buktiTransferSebelumnya: input.buktiTransferSebelumnya,
+            status: 'Menunggu Verifikasi',
+          };
+
+          if (isGasConfigured()) {
+            const result = await postToGas({
+              action: 'submitClaim',
+              claim: record,
+            });
+            if (result.claim) {
+              return result.claim;
+            }
+            if (result.proofUrl) {
+              record.buktiTransferSebelumnya = {
+                ...record.buktiTransferSebelumnya,
+                remoteUrl: result.proofUrl,
+              };
+            }
+            return record;
+          }
+
+          return saveLocalClaimRecord(record, SEED_CLAIMS);
+        }
+
+        async function updateClaimStatus(ticketNumber, status, currentClaim) {
+          const updatedAt = new Date().toISOString();
+
+          if (isGasConfigured()) {
+            const result = await postToGas({
+              action: 'updateStatus',
+              ticketNumber,
+              status,
+              updatedAt,
+            });
+            if (result.claim) {
+              return result.claim;
+            }
+            if (currentClaim) {
+              return { ...currentClaim, status, updatedAt };
+            }
+            throw new Error(`Status diperbarui, namun detail tiket ${ticketNumber} tidak tersedia.`);
+          }
+
+          const existing = await getLocalClaims(SEED_CLAIMS);
+          const target = existing.find((item) => item.ticketNumber === ticketNumber);
+          if (!target) {
+            throw new Error(`Tiket ${ticketNumber} tidak ditemukan.`);
+          }
+          const updated = { ...target, status, updatedAt };
+          return saveLocalClaimRecord(updated, SEED_CLAIMS);
+        }
+
+        async function uploadRefundProofAndNotify(params) {
+          const nowIso = new Date().toISOString();
+          const {
+            claim,
+            refundProof,
+            message,
+            note,
+            markAsTransferred,
+            sendToGroup = true,
+            sendToPhone = true,
+          } = params;
+          const nextStatus =
+            markAsTransferred === false ? claim.status : 'Selesai / Ditransfer';
+          const tujuanNotifikasi =
+            sendToGroup && sendToPhone ? 'keduanya' : sendToGroup ? 'grup' : 'ponsel';
+
+          if (isGasConfigured()) {
+            const result = await postToGas({
+              action: 'uploadRefundProof',
+              ticketNumber: claim.ticketNumber,
+              refundProof,
+              phoneNormalized: sendToPhone ? normalizePhoneToWa(claim.nomorPonsel) : '',
+              sendToGroup,
+              sendToPhone,
+              groupUrl: WHATSAPP_GROUP_URL,
+              message,
+              note: note || '',
+              status: markAsTransferred === false ? undefined : 'Selesai / Ditransfer',
+              updatedAt: nowIso,
+            });
+
+            if (result.claim) {
+              return result.claim;
+            }
+
+            const proofUrl = result.refundProofUrl || refundProof.remoteUrl;
+            const finalMessage = result.finalMessage || message;
+
+            return {
+              ...claim,
+              buktiTransferPengembalian: {
+                ...refundProof,
+                remoteUrl: proofUrl,
+              },
+              catatanPengembalian: (note || '').trim() || claim.catatanPengembalian,
+              pesanNotifikasiTerkirim: finalMessage,
+              tujuanNotifikasi,
+              notifikasiTerkirimAt: nowIso,
+              status: nextStatus,
+              updatedAt: nowIso,
+            };
+          }
+
+          const existing = await getLocalClaims(SEED_CLAIMS);
+          const target = existing.find((c) => c.ticketNumber === claim.ticketNumber) || claim;
+
+          const updated = {
+            ...target,
+            buktiTransferPengembalian: refundProof,
+            catatanPengembalian: (note || '').trim() || target.catatanPengembalian,
+            pesanNotifikasiTerkirim: message,
+            tujuanNotifikasi,
+            notifikasiTerkirimAt: nowIso,
+            status: nextStatus,
+            updatedAt: nowIso,
+          };
+
+          return saveLocalClaimRecord(updated, SEED_CLAIMS);
+        }
+
+        async function proofFileToFileObject(proof) {
+          const response = await fetch(proof.dataUrl);
+          const blob = await response.blob();
+          return new File([blob], proof.name, { type: proof.mimeType || blob.type });
+        }
+
+        async function copyImageProofToClipboard(proof) {
+          if (!proof.mimeType.startsWith('image/') || !navigator.clipboard || !navigator.clipboard.write) {
+            throw new Error('Browser tidak mendukung salin gambar langsung.');
+          }
+          const img = new Image();
+          img.crossOrigin = 'anonymous';
+          await new Promise((resolve, reject) => {
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error('Gagal memuat gambar lampiran.'));
+            img.src = proof.dataUrl;
+          });
+
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth || 800;
+          canvas.height = img.naturalHeight || 600;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) throw new Error('Kanvas tidak tersedia.');
+          ctx.drawImage(img, 0, 0);
+
+          const pngBlob = await new Promise((resolve, reject) => {
+            canvas.toBlob((blob) => {
+              if (blob) resolve(blob);
+              else reject(new Error('Gagal mengonversi gambar ke PNG.'));
+            }, 'image/png');
+          });
+
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })]);
+        }
+
+        // ===================================================================
+        // APPLICATION STATE
+        // ===================================================================
+        const state = {
+          mode: 'public', // 'public' | 'admin-pin' | 'admin'
+          submittedClaim: null,
+          showGasSetup: false,
+
+          // Public Form state
+          form: {
+            namaSiswa: '',
+            nomorRegistrasi: '',
+            nomorPonsel: '',
+            cabang: '',
+            programKursus: '',
+            periode: '',
+            selectedBank: '',
+            customBank: '',
+            nomorRekening: '',
+            namaPemilikRekening: '',
+            nominalKlaim: 0,
+            nominalDisplay: '',
+            buktiFile: null,
+            alasanKlaim: '',
+            errors: {},
+            submitError: null,
+            isSubmitting: false,
+          },
+
+          // Ticket Receipt state
+          receiptCopied: false,
+
+          // Admin PIN state
+          pinInput: '',
+          pinShow: false,
+          pinError: null,
+
+          // Admin Dashboard state
+          claims: [],
+          isLoading: false,
+          loadError: null,
+          actionError: null,
+          updatingTicket: null,
+          searchQuery: '',
+          statusFilter: 'Semua',
+          branchFilter: 'Semua',
+
+          // Modals
+          previewClaim: null,
+          previewTab: 'awal',
+
+          refundModal: null, // { claims, selectedTicket, refundProof, note, message, sendToGroup, sendToPhone, markAsTransferred, error, isSaving, completedRecord, copiedMsg, copiedImg, copiedShareLink, copiedDriveLink, shareFeedback }
+
+          gasCopied: false,
+        };
+
+        const rootEl = document.getElementById('app');
+
+        // ===================================================================
+        // RENDER HELPERS
+        // ===================================================================
+        function renderHeader() {
+          const { mode, submittedClaim } = state;
+          const hasReceipt = Boolean(submittedClaim);
+          let navHtml = '';
+          if (mode === 'public' && !hasReceipt) {
+            navHtml = `
+              <a href="#bagian-1" class="hover:text-[#8E1616] transition-colors whitespace-nowrap shrink-0">Data Siswa</a>
+              <a href="#bagian-2" class="hover:text-[#8E1616] transition-colors whitespace-nowrap shrink-0">Rekening &amp; Bukti</a>
+              <a href="#bagian-3" class="hover:text-[#8E1616] transition-colors whitespace-nowrap shrink-0">Alasan Klaim</a>
+            `;
+          } else if (mode === 'public' && hasReceipt) {
+            navHtml = `<span class="text-[#8C5E5E] whitespace-nowrap shrink-0">Bukti Pengajuan Tiket</span>`;
+          } else if (mode === 'admin') {
+            navHtml = `
+              <a href="#ringkasan-admin" class="hover:text-[#8E1616] transition-colors whitespace-nowrap shrink-0">Ringkasan Statistik</a>
+              <a href="#tabel-pengajuan" class="hover:text-[#8E1616] transition-colors whitespace-nowrap shrink-0">Daftar Pengajuan</a>
+              <button type="button" id="btn-header-gas" class="hover:text-[#8E1616] transition-colors whitespace-nowrap shrink-0 cursor-pointer">Integrasi Apps Script</button>
+            `;
+          }
+
+          const actionBtnHtml =
+            mode === 'public'
+              ? `
+                <button
+                  type="button"
+                  id="btn-enter-admin"
+                  class="inline-flex items-center gap-2 rounded-full border border-[#8E1616]/20 bg-white px-5 py-2 text-xs font-semibold text-[#3D0C0C] transition-colors hover:border-[#8E1616]/40 hover:bg-[#FFF0F0] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8E1616] whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  ${icon('lock', 'h-3.5 w-3.5 text-[#8E1616]')}
+                  Mode Admin
+                </button>
+              `
+              : `
+                <button
+                  type="button"
+                  id="btn-exit-admin"
+                  class="inline-flex items-center gap-2 rounded-full bg-[#8E1616] px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#731111] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8E1616] whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  ${icon('log-out', 'h-3.5 w-3.5')}
+                  ${mode === 'admin-pin' ? 'Kembali ke Formulir' : 'Keluar Admin'}
+                </button>
+              `;
+
+          return `
+            <header class="no-print sticky top-0 z-30 border-b border-[#8E1616]/10 bg-[#FEF9F9]/95 backdrop-blur-sm">
+              <div class="mx-auto flex h-16 max-w-7xl items-center justify-between gap-8 px-4 sm:px-6 lg:px-8">
+                <a
+                  href="#top"
+                  id="brand-link"
+                  class="font-mono text-xs font-semibold uppercase tracking-[0.15em] text-[#8C5E5E] hover:text-[#8E1616] transition-colors whitespace-nowrap shrink-0"
+                >
+                  Portal Klaim Pembayaran
+                </a>
+                <nav aria-label="Navigasi utama" class="hidden md:flex items-center gap-6 text-sm font-medium text-[#7E5454]">
+                  ${navHtml}
+                </nav>
+                <div class="flex items-center shrink-0">
+                  ${actionBtnHtml}
+                </div>
+              </div>
+            </header>
+          `;
+        }
+
+        function renderFooter() {
+          return `
+            <footer class="no-print border-t border-[#8E1616]/10 bg-white/70 py-5">
+              <div class="mx-auto flex max-w-7xl flex-col gap-2 px-4 text-xs text-[#8C5E5E] sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+                <span>Portal Pengajuan Klaim Kelebihan Pembayaran Siswa</span>
+                <span>
+                  ${
+                    state.mode === 'public'
+                      ? 'Layanan Pengajuan Resmi · Simpan Nomor Tiket Anda'
+                      : 'Mode Administrator Terproteksi PIN'
+                  }
+                </span>
+              </div>
+            </footer>
+          `;
+        }
+
+        function fieldInputClass(hasError, extra = '') {
+          return `mt-1.5 block w-full rounded-xl border bg-white px-3.5 py-2.5 text-sm text-[#3D0C0C] focus:outline-none focus:ring-2 ${
+            hasError
+              ? 'border-red-500 focus:ring-red-200'
+              : 'border-[#8E1616]/15 focus:border-[#8E1616] focus:ring-[#8E1616]/15'
+          } ${extra}`;
+        }
+
+        function renderPublicFormProofHtml() {
+          const f = state.form;
+          const hasErr = Boolean(f.errors.buktiTransferSebelumnya);
+          if (!f.buktiFile) {
+            return `
+              <label
+                for="field-buktiTransferSebelumnya"
+                class="mt-1.5 flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed px-6 py-8 text-center transition-colors ${
+                  hasErr
+                    ? 'border-red-400 bg-red-50/40 hover:bg-red-50/70'
+                    : 'border-[#8E1616]/20 bg-[#FEF9F9] hover:border-[#8E1616]/50 hover:bg-[#FFF0F0]/50'
+                }"
+              >
+                ${icon('upload', 'h-6 w-6 text-[#8E1616]')}
+                <span class="mt-2.5 text-sm font-semibold text-[#3D0C0C]">
+                  Pilih berkas bukti transfer dari perangkat Anda
+                </span>
+                <span class="mt-1 text-xs text-[#8C5E5E]">
+                  Format JPG, PNG, atau PDF · Ukuran maksimal 5 MB
+                </span>
+              </label>
+            `;
+          }
+          const isImg = f.buktiFile.mimeType.startsWith('image/');
+          const thumbHtml = isImg
+            ? `<img src="${escapeHtml(f.buktiFile.dataUrl)}" alt="Pratinjau ${escapeHtml(f.buktiFile.name)}" referrerpolicy="no-referrer" class="h-12 w-12 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
+            : `<div class="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-6 w-6')}</div>`;
+
+          return `
+            <div class="mt-1.5 flex items-center justify-between gap-4 rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-3.5">
+              <div class="flex items-center gap-3 min-w-0">
+                ${thumbHtml}
+                <div class="min-w-0">
+                  <p class="truncate text-sm font-semibold text-[#3D0C0C]">${escapeHtml(f.buktiFile.name)}</p>
+                  <p class="text-xs text-[#8C5E5E] tabular-nums">${formatFileSize(f.buktiFile.size)} · Siap diunggah</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                id="btn-remove-public-proof"
+                aria-label="Hapus file ${escapeHtml(f.buktiFile.name)}"
+                class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] hover:text-[#8E1616] transition-colors shrink-0 cursor-pointer"
+              >
+                ${icon('trash-2', 'h-3.5 w-3.5')}
+                Ganti
+              </button>
+            </div>
+          `;
+        }
+
+        function renderPublicForm() {
+          const f = state.form;
+          const e = f.errors;
+          return `
+            <div class="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-12 lg:px-8">
+              <div class="mb-10 max-w-3xl">
+                <p class="font-mono text-[11px] font-semibold uppercase tracking-[0.15em] text-[#8C5E5E]">
+                  Layanan Keuangan Siswa
+                </p>
+                <h1 class="mt-2 text-3xl font-extrabold tracking-[-0.04em] text-[#8E1616] sm:text-5xl [text-wrap:balance]">
+                  Pengajuan Klaim Kelebihan Pembayaran
+                </h1>
+                <p class="mt-3 text-base leading-relaxed text-[#7E5454]">
+                  Lengkapi formulir di bawah ini dengan data siswa, rekening tujuan pengembalian, dan
+                  bukti transfer yang valid. Nomor tiket resmi akan diterbitkan setelah pengajuan dikirim.
+                </p>
+              </div>
+
+              <div class="grid grid-cols-1 gap-8 lg:grid-cols-12 lg:items-start">
+                <form
+                  id="public-claim-form"
+                  novalidate
+                  class="lg:col-span-8 rounded-[20px] border border-[#8E1616]/10 bg-white p-6 sm:p-8 space-y-8"
+                >
+                  ${
+                    f.submitError
+                      ? `
+                        <div role="alert" class="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                          ${icon('alert-circle', 'mt-0.5 h-4 w-4 shrink-0 text-red-600')}
+                          <span>${escapeHtml(f.submitError)}</span>
+                        </div>
+                      `
+                      : ''
+                  }
+
+                  <section id="bagian-1" class="space-y-5">
+                    <div class="border-b border-[#8E1616]/10 pb-3">
+                      <h2 class="text-lg font-bold tracking-tight text-[#3D0C0C]">
+                        01. Data Siswa &amp; Program
+                      </h2>
+                      <p class="mt-1 text-xs text-[#8C5E5E]">
+                        Pastikan nomor registrasi dan nomor ponsel aktif untuk menerima notifikasi status klaim.
+                      </p>
+                    </div>
+
+                    <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                      <div class="sm:col-span-2">
+                        <label for="field-namaSiswa" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Nama Lengkap Siswa <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-namaSiswa"
+                          type="text"
+                          value="${escapeHtml(f.namaSiswa)}"
+                          placeholder="Masukkan nama lengkap siswa"
+                          aria-invalid="${Boolean(e.namaSiswa)}"
+                          class="${fieldInputClass(Boolean(e.namaSiswa), 'placeholder:text-[#A37A7A]')}"
+                        />
+                        <p id="err-namaSiswa" class="mt-1.5 text-xs text-red-700 ${e.namaSiswa ? '' : 'hidden'}">${escapeHtml(e.namaSiswa || '')}</p>
+                      </div>
+
+                      <div>
+                        <label for="field-nomorRegistrasi" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Nomor Registrasi <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-nomorRegistrasi"
+                          type="text"
+                          value="${escapeHtml(f.nomorRegistrasi)}"
+                          placeholder="Contoh: 101010"
+                          aria-invalid="${Boolean(e.nomorRegistrasi)}"
+                          class="${fieldInputClass(Boolean(e.nomorRegistrasi), 'font-mono tabular-nums placeholder:font-sans placeholder:text-[#A37A7A]')}"
+                        />
+                        <p id="err-nomorRegistrasi" class="mt-1.5 text-xs text-red-700 ${e.nomorRegistrasi ? '' : 'hidden'}">${escapeHtml(e.nomorRegistrasi || '')}</p>
+                      </div>
+
+                      <div>
+                        <label for="field-nomorPonsel" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Nomor Ponsel (WhatsApp) <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-nomorPonsel"
+                          type="tel"
+                          inputmode="tel"
+                          value="${escapeHtml(f.nomorPonsel)}"
+                          placeholder="Contoh: 081234567890"
+                          aria-invalid="${Boolean(e.nomorPonsel)}"
+                          class="${fieldInputClass(Boolean(e.nomorPonsel), 'font-mono tabular-nums placeholder:font-sans placeholder:text-[#A37A7A]')}"
+                        />
+                        <p id="err-nomorPonsel" class="mt-1.5 text-xs text-red-700 ${e.nomorPonsel ? '' : 'hidden'}">${escapeHtml(e.nomorPonsel || '')}</p>
+                      </div>
+
+                      <div>
+                        <label for="field-cabang" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Cabang <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <select
+                          id="field-cabang"
+                          aria-invalid="${Boolean(e.cabang)}"
+                          class="${fieldInputClass(Boolean(e.cabang))}"
+                        >
+                          <option value="">Pilih cabang kursus...</option>
+                          ${BRANCH_OPTIONS.map(
+                            (b) => `<option value="${escapeHtml(b)}" ${f.cabang === b ? 'selected' : ''}>${escapeHtml(b)}</option>`,
+                          ).join('')}
+                        </select>
+                        <p id="err-cabang" class="mt-1.5 text-xs text-red-700 ${e.cabang ? '' : 'hidden'}">${escapeHtml(e.cabang || '')}</p>
+                      </div>
+
+                      <div>
+                        <label for="field-programKursus" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Program Kursus <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-programKursus"
+                          type="text"
+                          value="${escapeHtml(f.programKursus)}"
+                          placeholder="Contoh: IEP 1 Bulan Camp AC"
+                          aria-invalid="${Boolean(e.programKursus)}"
+                          class="${fieldInputClass(Boolean(e.programKursus), 'placeholder:text-[#A37A7A]')}"
+                        />
+                        <p id="err-programKursus" class="mt-1.5 text-xs text-red-700 ${e.programKursus ? '' : 'hidden'}">${escapeHtml(e.programKursus || '')}</p>
+                      </div>
+
+                      <div class="sm:col-span-2">
+                        <label for="field-periode" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Periode <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-periode"
+                          type="text"
+                          value="${escapeHtml(f.periode)}"
+                          placeholder="Contoh: 01/01/2026"
+                          aria-invalid="${Boolean(e.periode)}"
+                          class="${fieldInputClass(Boolean(e.periode), 'font-mono tabular-nums placeholder:font-sans placeholder:text-[#A37A7A]')}"
+                        />
+                        <p id="err-periode" class="mt-1.5 text-xs text-red-700 ${e.periode ? '' : 'hidden'}">${escapeHtml(e.periode || '')}</p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section id="bagian-2" class="space-y-5 pt-2">
+                    <div class="border-b border-[#8E1616]/10 pb-3">
+                      <h2 class="text-lg font-bold tracking-tight text-[#3D0C0C]">
+                        02. Rekening Tujuan &amp; Bukti Transfer
+                      </h2>
+                      <p class="mt-1 text-xs text-[#8C5E5E]">
+                        Dana kelebihan pembayaran akan ditransfer ke rekening di bawah ini setelah diverifikasi.
+                      </p>
+                    </div>
+
+                    <div class="grid grid-cols-1 gap-5 sm:grid-cols-2">
+                      <div>
+                        <label for="field-namaBank" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Nama Bank Tujuan <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <select
+                          id="field-namaBank"
+                          aria-invalid="${Boolean(e.namaBank)}"
+                          class="${fieldInputClass(Boolean(e.namaBank))}"
+                        >
+                          <option value="">Pilih bank tujuan...</option>
+                          ${BANK_OPTIONS.map(
+                            (b) => `<option value="${escapeHtml(b)}" ${f.selectedBank === b ? 'selected' : ''}>${escapeHtml(b)}</option>`,
+                          ).join('')}
+                        </select>
+
+                        <input
+                          id="field-customBank"
+                          type="text"
+                          value="${escapeHtml(f.customBank)}"
+                          placeholder="Ketik nama bank tujuan"
+                          class="mt-2 ${f.selectedBank === 'Bank Lainnya' ? 'block' : 'hidden'} w-full rounded-xl border border-[#8E1616]/15 bg-white px-3.5 py-2 text-sm text-[#3D0C0C] placeholder:text-[#A37A7A] focus:border-[#8E1616] focus:outline-none focus:ring-2 focus:ring-[#8E1616]/15"
+                        />
+                        <p id="err-namaBank" class="mt-1.5 text-xs text-red-700 ${e.namaBank ? '' : 'hidden'}">${escapeHtml(e.namaBank || '')}</p>
+                      </div>
+
+                      <div>
+                        <label for="field-nomorRekening" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Nomor Rekening <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-nomorRekening"
+                          type="text"
+                          inputmode="numeric"
+                          value="${escapeHtml(f.nomorRekening)}"
+                          placeholder="Masukkan nomor rekening (hanya angka)"
+                          aria-invalid="${Boolean(e.nomorRekening)}"
+                          class="${fieldInputClass(Boolean(e.nomorRekening), 'font-mono tabular-nums placeholder:font-sans placeholder:text-[#A37A7A]')}"
+                        />
+                        <p id="err-nomorRekening" class="mt-1.5 text-xs text-red-700 ${e.nomorRekening ? '' : 'hidden'}">${escapeHtml(e.nomorRekening || '')}</p>
+                      </div>
+
+                      <div>
+                        <label for="field-namaPemilikRekening" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Nama Pemilik Rekening <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-namaPemilikRekening"
+                          type="text"
+                          value="${escapeHtml(f.namaPemilikRekening)}"
+                          placeholder="OTOMATIS HURUF KAPITAL"
+                          aria-invalid="${Boolean(e.namaPemilikRekening)}"
+                          class="${fieldInputClass(Boolean(e.namaPemilikRekening), 'font-medium uppercase tracking-wide placeholder:normal-case placeholder:font-normal placeholder:tracking-normal placeholder:text-[#A37A7A]')}"
+                        />
+                        <p class="mt-1 text-xs text-[#8C5E5E]">
+                          Otomatis dikonversi ke huruf kapital sesuai buku tabungan.
+                        </p>
+                        <p id="err-namaPemilikRekening" class="mt-1 text-xs text-red-700 ${e.namaPemilikRekening ? '' : 'hidden'}">${escapeHtml(e.namaPemilikRekening || '')}</p>
+                      </div>
+
+                      <div>
+                        <label for="field-nominalKlaim" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Nominal Klaim Kelebihan <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-nominalKlaim"
+                          type="text"
+                          inputmode="numeric"
+                          value="${escapeHtml(f.nominalDisplay)}"
+                          placeholder="Rp 0"
+                          aria-invalid="${Boolean(e.nominalKlaim)}"
+                          class="${fieldInputClass(Boolean(e.nominalKlaim), 'font-mono font-semibold tabular-nums text-[#8E1616] placeholder:font-normal placeholder:text-[#A37A7A]')}"
+                        />
+                        <p class="mt-1 text-xs text-[#8C5E5E]">
+                          Masukkan angka nominal kelebihan dalam Rupiah.
+                        </p>
+                        <p id="err-nominalKlaim" class="mt-1 text-xs text-red-700 ${e.nominalKlaim ? '' : 'hidden'}">${escapeHtml(e.nominalKlaim || '')}</p>
+                      </div>
+
+                      <div class="sm:col-span-2">
+                        <label for="field-buktiTransferSebelumnya" class="block text-sm font-semibold text-[#3D0C0C]">
+                          Upload Bukti Transfer Sebelumnya (JPG / PNG / PDF) <span class="text-[#8E1616]">*</span>
+                        </label>
+                        <input
+                          id="field-buktiTransferSebelumnya"
+                          type="file"
+                          accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf"
+                          class="sr-only"
+                        />
+                        <div id="public-proof-container">
+                          ${renderPublicFormProofHtml()}
+                        </div>
+                        <p id="err-buktiTransferSebelumnya" class="mt-1.5 text-xs text-red-700 ${e.buktiTransferSebelumnya ? '' : 'hidden'}">${escapeHtml(e.buktiTransferSebelumnya || '')}</p>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section id="bagian-3" class="space-y-4 pt-2">
+                    <div class="border-b border-[#8E1616]/10 pb-3">
+                      <h2 class="text-lg font-bold tracking-tight text-[#3D0C0C]">
+                        03. Alasan Pengajuan Klaim
+                      </h2>
+                      <p class="mt-1 text-xs text-[#8C5E5E]">
+                        Jelaskan kronologi kelebihan pembayaran secara ringkas dan jelas.
+                      </p>
+                    </div>
+
+                    <div>
+                      <label for="field-alasanKlaim" class="block text-sm font-semibold text-[#3D0C0C]">
+                        Keterangan Alasan Pengajuan Klaim Kelebihan Pembayaran <span class="text-[#8E1616]">*</span>
+                      </label>
+                      <textarea
+                        id="field-alasanKlaim"
+                        rows="4"
+                        placeholder="Contoh: Saya melakukan transfer dua kali untuk biaya program IEP 1 Bulan Camp AC pada tanggal 15 November 2026."
+                        aria-invalid="${Boolean(e.alasanKlaim)}"
+                        class="${fieldInputClass(Boolean(e.alasanKlaim), 'placeholder:text-[#A37A7A]')}"
+                      >${escapeHtml(f.alasanKlaim)}</textarea>
+                      <p id="err-alasanKlaim" class="mt-1.5 text-xs text-red-700 ${e.alasanKlaim ? '' : 'hidden'}">${escapeHtml(e.alasanKlaim || '')}</p>
+                    </div>
+                  </section>
+
+                  <div class="flex flex-col-reverse gap-3 border-t border-[#8E1616]/10 pt-6 sm:flex-row sm:items-center sm:justify-between">
+                    <p class="text-xs text-[#8C5E5E]">
+                      Dengan mengirim formulir ini, Anda menyatakan bahwa data yang diisi adalah benar.
+                    </p>
+                    <button
+                      type="submit"
+                      id="btn-submit-claim"
+                      ${f.isSubmitting ? 'disabled' : ''}
+                      class="inline-flex items-center justify-center gap-2 rounded-full bg-[#8E1616] px-7 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#731111] disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8E1616] whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      ${icon('send', 'h-4 w-4')}
+                      ${f.isSubmitting ? 'Mengirim Pengajuan...' : 'Kirim Pengajuan Klaim'}
+                    </button>
+                  </div>
+                </form>
+
+                <aside class="lg:col-span-4 rounded-[20px] border border-[#8E1616]/10 bg-white p-6 sm:p-7 space-y-6">
+                  <div>
+                    <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-[#8C5E5E]">
+                      Panduan Pengisian
+                    </p>
+                    <h2 class="mt-1.5 text-lg font-bold tracking-tight text-[#3D0C0C]">
+                      Ketentuan Pengajuan
+                    </h2>
+                    <p class="mt-1 text-xs leading-relaxed text-[#7E5454]">
+                      Mohon perhatikan hal berikut sebelum mengirim permohonan pengembalian dana:
+                    </p>
+                  </div>
+
+                  <ul class="space-y-4 text-sm text-[#3D0C0C]/90">
+                    <li class="flex items-start gap-3">
+                      ${icon('check-circle-2', 'mt-0.5 h-4 w-4 shrink-0 text-[#8E1616]')}
+                      <span>
+                        Sertakan foto atau tangkapan layar bukti transfer asli yang memperlihatkan tanggal,
+                        nominal, dan rekening pengirim.
+                      </span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                      ${icon('check-circle-2', 'mt-0.5 h-4 w-4 shrink-0 text-[#8E1616]')}
+                      <span>
+                        Nama pemilik rekening tujuan harus sesuai dengan identitas di buku tabungan agar
+                        transfer pengembalian tidak ditolak.
+                      </span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                      ${icon('check-circle-2', 'mt-0.5 h-4 w-4 shrink-0 text-[#8E1616]')}
+                      <span>
+                        Simpan <strong class="font-semibold text-[#8E1616]">Nomor Tiket</strong> yang
+                        muncul setelah pengiriman sebagai bukti resmi proses verifikasi keuangan.
+                      </span>
+                    </li>
+                    <li class="flex items-start gap-3">
+                      ${icon('check-circle-2', 'mt-0.5 h-4 w-4 shrink-0 text-[#8E1616]')}
+                      <span>
+                        Bukti transfer pengembalian dana akan dikirimkan otomatis ke nomor ponsel yang Anda
+                        daftarkan setelah dana ditransfer.
+                      </span>
+                    </li>
+                  </ul>
+                </aside>
+              </div>
+            </div>
+          `;
+        }
+
+        function renderTicketReceipt() {
+          const claim = state.submittedClaim;
+          if (!claim) return '';
+          return `
+            <div class="mx-auto max-w-3xl px-4 py-10 sm:px-6 sm:py-14">
+              <div class="rounded-[20px] border border-[#8E1616]/10 bg-white p-6 sm:p-10">
+                <div class="flex flex-col items-start gap-4 border-b border-[#8E1616]/10 pb-6 sm:flex-row sm:items-center sm:justify-between">
+                  <div class="flex items-start gap-3.5">
+                    <div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-[#FFF0F0] text-[#8E1616] border border-[#8E1616]/15">
+                      ${icon('check-circle-2', 'h-6 w-6')}
+                    </div>
+                    <div>
+                      <h1 class="text-xl font-extrabold tracking-[-0.03em] text-[#8E1616] sm:text-2xl">
+                        Pengajuan Klaim Berhasil Dikirim
+                      </h1>
+                      <p class="mt-1 text-sm text-[#7E5454]">
+                        Simpan nomor tiket di bawah ini sebagai bukti pengajuan Anda.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-6 flex flex-col gap-4 rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-5 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-[#8C5E5E]">
+                      Nomor Tiket Pengajuan
+                    </p>
+                    <p data-testid="ticket-number" class="mt-1 font-mono text-2xl font-extrabold tracking-tight text-[#8E1616] tabular-nums sm:text-3xl">
+                      ${escapeHtml(claim.ticketNumber)}
+                    </p>
+                    <p class="mt-1 text-xs text-[#7E5454] tabular-nums">
+                      Diajukan pada ${escapeHtml(formatIndonesianDateTime(claim.createdAt))} · Status: ${escapeHtml(claim.status)}
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    id="btn-copy-ticket"
+                    class="no-print inline-flex items-center justify-center gap-2 rounded-full border border-[#8E1616]/20 bg-white px-4 py-2 text-xs font-semibold text-[#3D0C0C] transition-colors hover:bg-[#FFF0F0] whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ${
+                      state.receiptCopied
+                        ? `${icon('check', 'h-3.5 w-3.5 text-emerald-700')} Tersalin`
+                        : `${icon('copy', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Nomor Tiket`
+                    }
+                  </button>
+                </div>
+
+                <dl class="mt-8 grid grid-cols-1 gap-x-6 gap-y-5 text-sm sm:grid-cols-2">
+                  <div>
+                    <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Nama Lengkap Siswa</dt>
+                    <dd class="mt-1 font-semibold text-[#3D0C0C]">${escapeHtml(claim.namaSiswa)}</dd>
+                  </div>
+                  <div>
+                    <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Nomor Registrasi</dt>
+                    <dd class="mt-1 font-mono font-medium text-[#3D0C0C] tabular-nums">${escapeHtml(claim.nomorRegistrasi)}</dd>
+                  </div>
+                  <div>
+                    <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Nomor Ponsel</dt>
+                    <dd class="mt-1 font-mono font-medium text-[#3D0C0C] tabular-nums">${escapeHtml(claim.nomorPonsel)}</dd>
+                  </div>
+                  <div>
+                    <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Cabang, Program &amp; Periode</dt>
+                    <dd class="mt-1 font-medium text-[#3D0C0C]">${escapeHtml(claim.cabang)} · ${escapeHtml(claim.programKursus)}</dd>
+                    ${
+                      claim.periode
+                        ? `<dd class="mt-0.5 font-mono text-xs text-[#7E5454] tabular-nums">Periode: ${escapeHtml(claim.periode)}</dd>`
+                        : ''
+                    }
+                  </div>
+                  <div>
+                    <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Rekening Tujuan Pengembalian</dt>
+                    <dd class="mt-1 font-medium text-[#3D0C0C]">
+                      ${escapeHtml(claim.namaBank)} · <span class="font-mono tabular-nums">${escapeHtml(claim.nomorRekening)}</span>
+                    </dd>
+                    <dd class="text-xs text-[#7E5454]">a.n. ${escapeHtml(claim.namaPemilikRekening)}</dd>
+                  </div>
+                  <div>
+                    <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Nominal Klaim Kelebihan</dt>
+                    <dd class="mt-1 font-mono text-lg font-extrabold text-[#8E1616] tabular-nums">${escapeHtml(formatRupiah(claim.nominalKlaim))}</dd>
+                  </div>
+                  <div class="sm:col-span-2">
+                    <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Lampiran Bukti Transfer</dt>
+                    <dd class="mt-1 text-[#3D0C0C]">${escapeHtml(claim.buktiTransferSebelumnya.name)}</dd>
+                  </div>
+                  <div class="sm:col-span-2">
+                    <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Alasan Pengajuan</dt>
+                    <dd class="mt-1 leading-relaxed text-[#7E5454]">${escapeHtml(claim.alasanKlaim)}</dd>
+                  </div>
+                </dl>
+
+                <div class="no-print mt-8 flex flex-col gap-3 border-t border-[#8E1616]/10 pt-6 sm:flex-row sm:items-center sm:justify-between">
+                  <button
+                    type="button"
+                    id="btn-print-receipt"
+                    class="inline-flex items-center justify-center gap-2 rounded-full border border-[#8E1616]/20 bg-white px-5 py-2.5 text-sm font-semibold text-[#3D0C0C] transition-colors hover:bg-[#FFF0F0] whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ${icon('printer', 'h-4 w-4 text-[#8E1616]')}
+                    Cetak Bukti Tiket
+                  </button>
+                  <button
+                    type="button"
+                    id="btn-create-another"
+                    class="inline-flex items-center justify-center gap-2 rounded-full bg-[#8E1616] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#731111] whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ${icon('plus-circle', 'h-4 w-4')}
+                    Ajukan Klaim Baru
+                  </button>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        function renderAdminPinGate() {
+          return `
+            <div class="mx-auto flex min-h-[calc(100vh-8rem)] max-w-md items-center px-4 py-12">
+              <div class="w-full rounded-[20px] border border-[#8E1616]/10 bg-white p-6 sm:p-8">
+                <div class="flex h-11 w-11 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-[#FFF0F0] text-[#8E1616]">
+                  ${icon('key-round', 'h-5 w-5')}
+                </div>
+
+                <h1 class="mt-5 text-2xl font-extrabold tracking-[-0.03em] text-[#8E1616]">
+                  Akses Mode Administrator
+                </h1>
+                <p class="mt-1.5 text-sm leading-relaxed text-[#7E5454]">
+                  Masukkan PIN otorisasi tim keuangan untuk membuka portal verifikasi klaim, statistik,
+                  pratinjau bukti, dan unggah bukti pengembalian dana.
+                </p>
+
+                <form id="admin-pin-form" class="mt-6 space-y-4">
+                  <div>
+                    <label for="admin-pin-input" class="block text-sm font-semibold text-[#3D0C0C]">
+                      PIN Administrator
+                    </label>
+                    <div class="relative mt-1.5">
+                      <input
+                        id="admin-pin-input"
+                        type="${state.pinShow ? 'text' : 'password'}"
+                        inputmode="numeric"
+                        autofocus
+                        value="${escapeHtml(state.pinInput)}"
+                        placeholder="Masukkan 6 digit PIN"
+                        aria-invalid="${Boolean(state.pinError)}"
+                        class="block w-full rounded-xl border bg-white py-2.5 pl-3.5 pr-11 font-mono text-base tracking-widest text-[#3D0C0C] placeholder:font-sans placeholder:text-sm placeholder:tracking-normal placeholder:text-[#A37A7A] focus:outline-none focus:ring-2 ${
+                          state.pinError
+                            ? 'border-red-500 focus:ring-red-200'
+                            : 'border-[#8E1616]/15 focus:border-[#8E1616] focus:ring-[#8E1616]/15'
+                        }"
+                      />
+                      <button
+                        type="button"
+                        id="btn-toggle-pin"
+                        aria-label="${state.pinShow ? 'Sembunyikan PIN' : 'Tampilkan PIN'}"
+                        class="absolute inset-y-0 right-0 flex items-center px-3 text-[#8C5E5E] hover:text-[#8E1616] cursor-pointer"
+                      >
+                        ${state.pinShow ? icon('eye-off', 'h-4 w-4') : icon('eye', 'h-4 w-4')}
+                      </button>
+                    </div>
+                    <p id="err-admin-pin" role="alert" class="mt-2 flex items-center gap-1.5 text-xs text-red-700 ${state.pinError ? '' : 'hidden'}">
+                      ${icon('alert-circle', 'h-3.5 w-3.5 shrink-0')}
+                      <span>${escapeHtml(state.pinError || '')}</span>
+                    </p>
+                  </div>
+
+                  <button
+                    type="submit"
+                    class="w-full rounded-full bg-[#8E1616] px-5 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#731111] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8E1616] cursor-pointer"
+                  >
+                    Buka Portal Administrator
+                  </button>
+                </form>
+
+                <div class="mt-6 flex items-center justify-between border-t border-[#8E1616]/10 pt-4 text-xs text-[#8C5E5E]">
+                  <span>PIN bawaan: ${escapeHtml(ADMIN_PIN)}</span>
+                  <button
+                    type="button"
+                    id="btn-pin-cancel"
+                    class="inline-flex items-center gap-1 font-semibold text-[#3D0C0C] hover:text-[#8E1616] cursor-pointer"
+                  >
+                    ${icon('arrow-left', 'h-3.5 w-3.5')}
+                    Kembali ke Formulir
+                  </button>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        function renderAdminTableBodyHtml(filteredClaims) {
+          if (state.isLoading) {
+            return `
+              <div class="p-6 space-y-3" aria-busy="true">
+                <div class="h-12 w-full animate-pulse rounded-xl bg-[#FEF9F9]"></div>
+                <div class="h-12 w-full animate-pulse rounded-xl bg-[#FEF9F9]"></div>
+                <div class="h-12 w-full animate-pulse rounded-xl bg-[#FEF9F9]"></div>
+              </div>
+            `;
+          }
+
+          if (state.loadError) {
+            return `
+              <div class="p-10 text-center space-y-3">
+                ${icon('alert-circle', 'mx-auto h-8 w-8 text-[#8E1616]')}
+                <p class="text-sm font-semibold text-[#3D0C0C]">${escapeHtml(state.loadError)}</p>
+                <button
+                  type="button"
+                  id="btn-retry-load"
+                  class="rounded-full border border-[#8E1616]/20 bg-white px-4 py-2 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer"
+                >
+                  Coba Muat Ulang
+                </button>
+              </div>
+            `;
+          }
+
+          if (filteredClaims.length === 0) {
+            const hasFilter =
+              state.searchQuery || state.statusFilter !== 'Semua' || state.branchFilter !== 'Semua';
+            return `
+              <div class="p-12 text-center space-y-2">
+                <p class="text-sm font-semibold text-[#3D0C0C]">Tidak ada pengajuan yang sesuai</p>
+                <p class="text-xs text-[#7E5454]">
+                  Ubah kata kunci pencarian atau atur ulang filter status dan cabang.
+                </p>
+                ${
+                  hasFilter
+                    ? `<button type="button" id="btn-reset-filters" class="mt-2 inline-flex rounded-full border border-[#8E1616]/20 bg-white px-4 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">Reset Filter</button>`
+                    : ''
+                }
+              </div>
+            `;
+          }
+
+          const rowsHtml = filteredClaims
+            .map((claim) => {
+              const statusStyle =
+                STATUS_SELECT_STYLES[claim.status] ||
+                'border-[#8E1616]/20 bg-white text-[#3D0C0C]';
+              const isUpdating = state.updatingTicket === claim.ticketNumber;
+              return `
+                <tr class="hover:bg-[#FEF9F9]/80 transition-colors">
+                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                    <div class="font-mono text-xs font-semibold text-[#3D0C0C] tabular-nums">
+                      ${escapeHtml(claim.ticketNumber)}
+                    </div>
+                    <div class="mt-0.5 text-xs text-[#8C5E5E] tabular-nums">
+                      ${escapeHtml(formatIndonesianDateTime(claim.createdAt))}
+                    </div>
+                  </td>
+
+                  <td class="px-2.5 py-4 align-top">
+                    <div class="font-semibold text-[#3D0C0C]">${escapeHtml(claim.namaSiswa)}</div>
+                    <div class="mt-0.5 font-mono text-xs text-[#7E5454] tabular-nums">
+                      Reg ${escapeHtml(claim.nomorRegistrasi)} · ${escapeHtml(claim.nomorPonsel)}
+                    </div>
+                  </td>
+
+                  <td class="px-2.5 py-4 align-top">
+                    <div class="font-medium text-[#3D0C0C]">${escapeHtml(claim.cabang)}</div>
+                    <div class="mt-0.5 text-xs text-[#7E5454] max-w-[160px] truncate" title="${escapeHtml(claim.programKursus)}">
+                      ${escapeHtml(claim.programKursus)}
+                    </div>
+                  </td>
+
+                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                    <span class="font-mono text-xs font-medium text-[#3D0C0C] tabular-nums">
+                      ${escapeHtml((claim.periode || '').trim() || '-')}
+                    </span>
+                  </td>
+
+                  <td class="px-2.5 py-4 align-top">
+                    <div class="font-medium text-[#3D0C0C]">
+                      ${escapeHtml(claim.namaBank)} ·
+                      <span class="font-mono text-xs tabular-nums">${escapeHtml(claim.nomorRekening)}</span>
+                    </div>
+                    <div class="mt-0.5 text-xs text-[#7E5454]">
+                      ${escapeHtml(claim.namaPemilikRekening)}
+                    </div>
+                  </td>
+
+                  <td class="px-2.5 py-4 align-top text-right whitespace-nowrap">
+                    <span class="font-mono font-bold text-[#8E1616] tabular-nums">
+                      ${escapeHtml(formatRupiah(claim.nominalKlaim))}
+                    </span>
+                  </td>
+
+                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                    <button
+                      type="button"
+                      data-action="preview"
+                      data-ticket="${escapeHtml(claim.ticketNumber)}"
+                      aria-label="Pratinjau bukti ${escapeHtml(claim.ticketNumber)}"
+                      class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer"
+                    >
+                      ${icon('eye', 'h-3.5 w-3.5 text-[#8E1616]')}
+                      Pratinjau
+                    </button>
+                  </td>
+
+                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                    <select
+                      data-action="status-change"
+                      data-ticket="${escapeHtml(claim.ticketNumber)}"
+                      aria-label="Status persetujuan ${escapeHtml(claim.ticketNumber)}"
+                      ${isUpdating ? 'disabled' : ''}
+                      class="w-36 rounded-lg border px-2 py-1.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#8E1616]/20 cursor-pointer ${statusStyle}"
+                    >
+                      ${CLAIM_STATUS_OPTIONS.map(
+                        (opt) =>
+                          `<option value="${escapeHtml(opt.value)}" ${claim.status === opt.value ? 'selected' : ''}>${escapeHtml(opt.label)}</option>`,
+                      ).join('')}
+                    </select>
+                  </td>
+
+                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                    <button
+                      type="button"
+                      data-action="refund"
+                      data-ticket="${escapeHtml(claim.ticketNumber)}"
+                      aria-label="Upload bukti transfer dan kirim ke ${escapeHtml(claim.namaSiswa)}"
+                      class="inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                        claim.buktiTransferPengembalian
+                          ? 'border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
+                          : 'bg-[#8E1616] text-white hover:bg-[#731111]'
+                      }"
+                    >
+                      ${icon('send', 'h-3.5 w-3.5')}
+                      ${claim.buktiTransferPengembalian ? 'Terkirim / Ubah' : 'Upload & Kirim'}
+                    </button>
+                  </td>
+                </tr>
+              `;
+            })
+            .join('');
+
+          return `
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-left text-sm border-collapse">
+                <thead>
+                  <tr class="border-b border-[#8E1616]/10 font-mono text-[10px] uppercase tracking-[0.12em] text-[#8C5E5E]">
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Tiket &amp; Tanggal</th>
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Siswa</th>
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Cabang &amp; Program</th>
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Periode</th>
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Rekening Tujuan</th>
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold text-right whitespace-nowrap">Nominal Klaim</th>
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Bukti Transfer</th>
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Persetujuan Status</th>
+                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Transfer &amp; Ponsel</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-[#8E1616]/5 bg-white">
+                  ${rowsHtml}
+                </tbody>
+              </table>
+            </div>
+          `;
+        }
+
+        function renderAdminDashboard() {
+          const stats = computeClaimStats(state.claims);
+          const filteredClaims = filterClaims(
+            state.claims,
+            state.searchQuery,
+            state.statusFilter,
+            state.branchFilter,
+          );
+          const statusTabs = ['Semua', ...CLAIM_STATUS_OPTIONS.map((s) => s.value)];
+
+          return `
+            <div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8 space-y-8">
+              <div class="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <p class="font-mono text-[11px] font-semibold uppercase tracking-[0.15em] text-[#8C5E5E]">
+                    Portal Administrator Keuangan
+                  </p>
+                  <h1 class="mt-1.5 text-3xl font-extrabold tracking-[-0.04em] text-[#8E1616] sm:text-5xl">
+                    Verifikasi Klaim Siswa
+                  </h1>
+                  <p class="mt-2 text-sm text-[#7E5454]">
+                    Sumber data:
+                    <span class="font-semibold text-[#3D0C0C]">
+                      ${
+                        isGasConfigured()
+                          ? 'Google Apps Script (Sheets & Drive)'
+                          : 'Penyimpanan Lokal Browser (Siap dihubungkan ke WEB_APP_URL)'
+                      }
+                    </span>
+                  </p>
+                </div>
+
+                <div class="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    id="btn-global-refund"
+                    ${state.claims.length === 0 ? 'disabled' : ''}
+                    class="inline-flex items-center gap-2 rounded-full bg-[#8E1616] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#731111] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ${icon('send', 'h-3.5 w-3.5')}
+                    Upload Bukti Transfer Klaim
+                  </button>
+                  <button
+                    type="button"
+                    id="btn-open-gas"
+                    class="inline-flex items-center gap-2 rounded-full border border-[#8E1616]/20 bg-white px-4 py-2.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ${icon('settings', 'h-3.5 w-3.5 text-[#8E1616]')}
+                    Konfigurasi Apps Script
+                  </button>
+                  <button
+                    type="button"
+                    id="btn-reload-claims"
+                    ${state.isLoading ? 'disabled' : ''}
+                    class="inline-flex items-center gap-2 rounded-full border border-[#8E1616]/20 bg-white px-4 py-2.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ${icon('refresh-cw', `h-3.5 w-3.5 text-[#8E1616] ${state.isLoading ? 'animate-spin' : ''}`)}
+                    Muat Ulang
+                  </button>
+                  <button
+                    type="button"
+                    id="btn-export-csv"
+                    ${filteredClaims.length === 0 ? 'disabled' : ''}
+                    class="inline-flex items-center gap-2 rounded-full bg-[#3D0C0C] px-5 py-2.5 text-xs font-semibold text-white hover:bg-[#2A0808] disabled:opacity-50 whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ${icon('download', 'h-3.5 w-3.5')}
+                    Ekspor CSV
+                  </button>
+                </div>
+              </div>
+
+              <section id="ringkasan-admin" aria-label="Resume statistik pengajuan klaim" class="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
+                <div class="rounded-[20px] border border-[#8E1616]/10 bg-white p-6">
+                  <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-[#8C5E5E]">Total Klaim</p>
+                  <p data-testid="stat-total-klaim" class="mt-2 font-mono text-3xl font-extrabold text-[#8E1616] tabular-nums">${stats.totalKlaim}</p>
+                  <p class="mt-1.5 text-xs text-[#7E5454] tabular-nums">${stats.selesaiDitransfer} selesai ditransfer</p>
+                </div>
+
+                <div class="rounded-[20px] border border-[#8E1616]/10 bg-white p-6">
+                  <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-[#8C5E5E]">Menunggu Verifikasi</p>
+                  <p data-testid="stat-menunggu" class="mt-2 font-mono text-3xl font-extrabold text-[#B22222] tabular-nums">${stats.menungguVerifikasi}</p>
+                  <p class="mt-1.5 text-xs text-[#7E5454] tabular-nums">
+                    ${
+                      stats.verifikasiAdmin > 0
+                        ? `${stats.verifikasiAdmin} dalam verifikasi admin`
+                        : 'Perlu pemeriksaan admin &amp; finance'
+                    }
+                  </p>
+                </div>
+
+                <div class="rounded-[20px] border border-[#8E1616]/10 bg-white p-6">
+                  <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-[#8C5E5E]">Disetujui</p>
+                  <p data-testid="stat-disetujui" class="mt-2 font-mono text-3xl font-extrabold text-[#8E1616] tabular-nums">${stats.disetujui}</p>
+                  <p class="mt-1.5 text-xs text-[#7E5454]">Siap diproses transfer balik</p>
+                </div>
+
+                <div class="rounded-[20px] border border-[#8E1616]/10 bg-white p-6">
+                  <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.15em] text-[#8C5E5E]">Total Nominal</p>
+                  <p data-testid="stat-total-nominal" class="mt-2 font-mono text-2xl font-extrabold text-[#8E1616] tabular-nums">${escapeHtml(formatRupiah(stats.totalNominal))}</p>
+                  <p class="mt-2 text-xs text-[#7E5454]">Akumulasi seluruh klaim tercatat</p>
+                </div>
+              </section>
+
+              ${
+                state.actionError
+                  ? `
+                    <div role="alert" class="flex items-start gap-2.5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+                      ${icon('alert-circle', 'mt-0.5 h-4 w-4 shrink-0 text-red-600')}
+                      <span>${escapeHtml(state.actionError)}</span>
+                    </div>
+                  `
+                  : ''
+              }
+
+              <section id="tabel-pengajuan" class="rounded-[20px] border border-[#8E1616]/10 bg-white overflow-hidden">
+                <div class="border-b border-[#8E1616]/10 p-5 sm:p-6 space-y-4">
+                  <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div class="relative flex-1 max-w-md">
+                      ${icon('search', 'pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#8C5E5E]')}
+                      <input
+                        id="admin-search-input"
+                        type="search"
+                        aria-label="Cari pengajuan klaim"
+                        value="${escapeHtml(state.searchQuery)}"
+                        placeholder="Cari nomor tiket, nama siswa, no. registrasi, ponsel, atau bank..."
+                        class="block w-full rounded-full border border-[#8E1616]/15 bg-[#FEF9F9]/50 py-2 pl-10 pr-4 text-sm text-[#3D0C0C] placeholder:text-[#A37A7A] focus:border-[#8E1616] focus:bg-white focus:outline-none focus:ring-2 focus:ring-[#8E1616]/15"
+                      />
+                    </div>
+
+                    <div class="flex flex-wrap items-center gap-3">
+                      <select
+                        id="admin-branch-filter"
+                        aria-label="Filter berdasarkan cabang"
+                        class="rounded-full border border-[#8E1616]/15 bg-white px-4 py-2 text-xs font-semibold text-[#3D0C0C] focus:border-[#8E1616] focus:outline-none focus:ring-2 focus:ring-[#8E1616]/15"
+                      >
+                        <option value="Semua">Semua Cabang</option>
+                        ${BRANCH_OPTIONS.map(
+                          (b) => `<option value="${escapeHtml(b)}" ${state.branchFilter === b ? 'selected' : ''}>${escapeHtml(b)}</option>`,
+                        ).join('')}
+                      </select>
+
+                      <span id="admin-count-badge" class="text-xs text-[#8C5E5E] tabular-nums whitespace-nowrap">
+                        Menampilkan ${filteredClaims.length} dari ${state.claims.length} data
+                      </span>
+                    </div>
+                  </div>
+
+                  <div role="tablist" aria-label="Filter status pengajuan" class="flex items-center gap-1 overflow-x-auto rounded-full bg-[#FEF9F9] border border-[#8E1616]/10 p-1 w-full sm:w-fit">
+                    ${statusTabs
+                      .map(
+                        (tab) => `
+                          <button
+                            type="button"
+                            role="tab"
+                            data-status-tab="${escapeHtml(tab)}"
+                            aria-selected="${state.statusFilter === tab}"
+                            class="rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                              state.statusFilter === tab
+                                ? 'bg-[#8E1616] text-white'
+                                : 'text-[#7E5454] hover:text-[#8E1616]'
+                            }"
+                          >
+                            ${escapeHtml(tab)}
+                          </button>
+                        `,
+                      )
+                      .join('')}
+                  </div>
+                </div>
+
+                <div id="admin-table-container">
+                  ${renderAdminTableBodyHtml(filteredClaims)}
+                </div>
+              </section>
+            </div>
+          `;
+        }
+
+        function renderProofViewer(title, file) {
+          const isPdf =
+            file.mimeType === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+          const rawUrl = file.dataUrl || file.remoteUrl || '';
+          const renderUrl = rawUrl.startsWith('data:')
+            ? rawUrl
+            : getDriveRenderUrl(rawUrl, isPdf ? 'application/pdf' : file.mimeType);
+
+          let viewerHtml = `<div class="flex h-48 items-center justify-center text-sm text-[#8C5E5E]">Pratinjau tidak tersedia.</div>`;
+          if (isPdf) {
+            viewerHtml = renderUrl
+              ? `<iframe title="${escapeHtml(title)}" src="${escapeHtml(renderUrl)}" class="h-80 w-full bg-white"></iframe>`
+              : `
+                <div class="flex h-56 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-[#7E5454]">
+                  ${icon('file-text', 'h-10 w-10 text-[#8E1616]')}
+                  <p class="font-semibold text-[#3D0C0C]">${escapeHtml(file.name)}</p>
+                  <p class="text-xs text-[#8C5E5E]">Gunakan tombol Unduh atau Buka Drive untuk melihat dokumen PDF ini.</p>
+                </div>
+              `;
+          } else if (renderUrl) {
+            viewerHtml = `<img src="${escapeHtml(renderUrl)}" alt="${escapeHtml(title)}" referrerpolicy="no-referrer" class="max-h-96 w-full object-contain bg-white p-2" />`;
+          }
+
+          return `
+            <div class="space-y-3">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 class="text-sm font-bold text-[#3D0C0C]">${escapeHtml(title)}</h3>
+                  <p class="text-xs text-[#8C5E5E] tabular-nums">
+                    ${escapeHtml(file.name)}${file.size > 0 ? ` · ${formatFileSize(file.size)}` : ''}
+                  </p>
+                </div>
+                ${
+                  rawUrl
+                    ? `
+                      <div class="flex items-center gap-2">
+                        <a
+                          href="${escapeHtml(rawUrl)}"
+                          download="${escapeHtml(file.name)}"
+                          class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] whitespace-nowrap shrink-0"
+                        >
+                          ${icon('download', 'h-3.5 w-3.5 text-[#8E1616]')}
+                          Unduh
+                        </a>
+                        ${
+                          file.remoteUrl
+                            ? `
+                              <a
+                                href="${escapeHtml(file.remoteUrl)}"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] whitespace-nowrap shrink-0"
+                              >
+                                ${icon('external-link', 'h-3.5 w-3.5 text-[#8E1616]')}
+                                Buka Drive
+                              </a>
+                            `
+                            : ''
+                        }
+                      </div>
+                    `
+                    : ''
+                }
+              </div>
+              <div class="overflow-hidden rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9]">
+                ${viewerHtml}
+              </div>
+            </div>
+          `;
+        }
+
+        function renderProofPreviewModal() {
+          const claim = state.previewClaim;
+          if (!claim) return '';
+          const showRefund =
+            state.previewTab === 'refund' && Boolean(claim.buktiTransferPengembalian);
+          return `
+            <div role="dialog" aria-modal="true" aria-labelledby="proof-modal-title" class="fixed inset-0 z-50 flex items-center justify-center bg-[#3D0C0C]/45 p-4 backdrop-blur-[2px]">
+              <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-[20px] border border-[#8E1616]/15 bg-white shadow-xl">
+                <div class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-[#8E1616]/10 bg-white px-6 py-4">
+                  <div>
+                    <p class="font-mono text-xs font-semibold text-[#8E1616] tabular-nums">${escapeHtml(claim.ticketNumber)}</p>
+                    <h2 id="proof-modal-title" class="text-lg font-extrabold tracking-tight text-[#3D0C0C]">
+                      Pratinjau Bukti &amp; Detail Klaim
+                    </h2>
+                  </div>
+                  <button type="button" id="btn-close-preview" aria-label="Tutup pratinjau bukti" class="rounded-full border border-[#8E1616]/15 p-2 text-[#8C5E5E] hover:bg-[#FFF0F0] hover:text-[#8E1616] cursor-pointer">
+                    ${icon('x', 'h-4 w-4')}
+                  </button>
+                </div>
+
+                <div class="space-y-6 p-6">
+                  <dl class="grid grid-cols-1 gap-4 rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-4 text-sm sm:grid-cols-3">
+                    <div>
+                      <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">Siswa</dt>
+                      <dd class="mt-0.5 font-semibold text-[#3D0C0C]">${escapeHtml(claim.namaSiswa)}</dd>
+                      <dd class="font-mono text-xs text-[#7E5454] tabular-nums">
+                        Reg: ${escapeHtml(claim.nomorRegistrasi)} · ${escapeHtml(claim.nomorPonsel)}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">Cabang, Program &amp; Periode</dt>
+                      <dd class="mt-0.5 font-medium text-[#3D0C0C]">${escapeHtml(claim.cabang)}</dd>
+                      <dd class="text-xs text-[#7E5454]">${escapeHtml(claim.programKursus)}</dd>
+                      <dd class="mt-0.5 font-mono text-xs text-[#8C5E5E] tabular-nums">
+                        Periode: ${escapeHtml((claim.periode || '').trim() || '-')}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">Nominal &amp; Rekening</dt>
+                      <dd class="mt-0.5 font-mono font-bold text-[#8E1616] tabular-nums">${escapeHtml(formatRupiah(claim.nominalKlaim))}</dd>
+                      <dd class="text-xs text-[#7E5454]">
+                        ${escapeHtml(claim.namaBank)} ${escapeHtml(claim.nomorRekening)} (${escapeHtml(claim.namaPemilikRekening)})
+                      </dd>
+                    </div>
+                    <div class="sm:col-span-3 border-t border-[#8E1616]/10 pt-3">
+                      <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">Alasan Pengajuan Klaim</dt>
+                      <dd class="mt-1 text-[#3D0C0C] leading-relaxed">${escapeHtml(claim.alasanKlaim)}</dd>
+                      <dd class="mt-1 text-xs text-[#8C5E5E] tabular-nums">
+                        Diajukan: ${escapeHtml(formatIndonesianDateTime(claim.createdAt))} · Status: ${escapeHtml(claim.status)}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  ${
+                    claim.buktiTransferPengembalian
+                      ? `
+                        <div class="flex items-center gap-1 rounded-full bg-[#FEF9F9] border border-[#8E1616]/10 p-1 w-fit">
+                          <button type="button" data-preview-tab="awal" class="rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${!showRefund ? 'bg-[#8E1616] text-white' : 'text-[#7E5454] hover:text-[#8E1616]'}">
+                            Bukti Transfer Sebelumnya
+                          </button>
+                          <button type="button" data-preview-tab="refund" class="rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${showRefund ? 'bg-[#8E1616] text-white' : 'text-[#7E5454] hover:text-[#8E1616]'}">
+                            Bukti Transfer Pengembalian
+                          </button>
+                        </div>
+                      `
+                      : ''
+                  }
+
+                  ${
+                    showRefund && claim.buktiTransferPengembalian
+                      ? renderProofViewer('Bukti Transfer Pengembalian Dana (Dari Finance)', claim.buktiTransferPengembalian)
+                      : renderProofViewer('Bukti Transfer Sebelumnya (Dari Siswa)', claim.buktiTransferSebelumnya)
+                  }
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        function renderRefundModal() {
+          const rm = state.refundModal;
+          if (!rm) return '';
+          const claim =
+            rm.claims.find((c) => c.ticketNumber === rm.selectedTicket) || rm.claims[0];
+          if (!claim) return '';
+
+          const normalizedPhone = normalizePhoneToWa(claim.nomorPonsel);
+          const finalMessage =
+            (rm.completedRecord && rm.completedRecord.pesanNotifikasiTerkirim) || rm.message;
+          const savedAttachment =
+            (rm.completedRecord && rm.completedRecord.buktiTransferPengembalian) ||
+            rm.refundProof;
+          const waShareTextUrl = buildWhatsAppShareTextUrl(finalMessage);
+          const waUrl = buildWhatsAppUrl(claim.nomorPonsel, finalMessage);
+          const canWebShareFiles =
+            typeof navigator !== 'undefined' && typeof navigator.share === 'function';
+
+          const bodyHtml = rm.completedRecord
+            ? `
+              <div class="space-y-5">
+                <div class="flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                  ${icon('check-circle-2', 'mt-0.5 h-5 w-5 shrink-0 text-emerald-700')}
+                  <div class="space-y-1">
+                    <p class="font-semibold">
+                      Bukti transfer tersimpan &amp; pesan rincian klaim siap dikirim.
+                    </p>
+                    <p class="text-xs leading-relaxed text-emerald-800">
+                      Tautan undangan grup (<code class="font-mono">chat.whatsapp.com</code>) tidak
+                      mendukung pengisian teks otomatis dari URL. Gunakan tombol
+                      <strong>Pilih Grup &amp; Kirim Teks Otomatis</strong> agar rincian nama hingga
+                      nominal langsung terisi di WhatsApp, atau salin teks di bawah ini lalu tempel
+                      (<kbd class="rounded bg-white/80 px-1">Ctrl+V</kbd>) di dalam grup.
+                    </p>
+                  </div>
+                </div>
+
+                <div class="rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-4 space-y-2.5">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <span class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">
+                      Rincian Klaim untuk Grup &amp; Siswa
+                    </span>
+                    <div class="flex flex-wrap items-center gap-2">
+                      <button type="button" id="btn-copy-wa-msg" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                        ${
+                          rm.copiedMsg
+                            ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Rincian Disalin`
+                            : `${icon('copy', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Rincian Klaim`
+                        }
+                      </button>
+                      <button type="button" id="btn-copy-wa-share-link" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                        ${
+                          rm.copiedShareLink
+                            ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Link WA Disalin`
+                            : `${icon('link-2', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Link Pesan WA`
+                        }
+                      </button>
+                    </div>
+                  </div>
+                  <pre data-testid="completed-claim-message" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl border border-[#8E1616]/10 bg-white p-3 font-sans text-xs leading-relaxed text-[#3D0C0C]">${escapeHtml(finalMessage)}</pre>
+                </div>
+
+                ${
+                  savedAttachment
+                    ? `
+                      <div class="flex flex-col gap-3 rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-4 sm:flex-row sm:items-center sm:justify-between">
+                        <div class="flex items-center gap-3 min-w-0">
+                          ${
+                            savedAttachment.mimeType.startsWith('image/')
+                              ? `<img src="${escapeHtml(savedAttachment.dataUrl)}" alt="Lampiran ${escapeHtml(savedAttachment.name)}" referrerpolicy="no-referrer" class="h-14 w-14 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
+                              : `<div class="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-6 w-6')}</div>`
+                          }
+                          <div class="min-w-0">
+                            <p class="truncate text-sm font-semibold text-[#3D0C0C]">${escapeHtml(savedAttachment.name)}</p>
+                            <p class="text-xs text-[#8C5E5E] tabular-nums">
+                              ${savedAttachment.size > 0 ? formatFileSize(savedAttachment.size) : 'Lampiran siap'}
+                              ${
+                                savedAttachment.remoteUrl
+                                  ? ' · Link Google Drive tersedia'
+                                  : ' · Hubungkan WEB_APP_URL untuk link Google Drive'
+                              }
+                            </p>
+                          </div>
+                        </div>
+
+                        <div class="flex flex-wrap items-center gap-2 shrink-0">
+                          ${
+                            savedAttachment.remoteUrl
+                              ? `
+                                <button type="button" id="btn-copy-drive-link" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                                  ${
+                                    rm.copiedDriveLink
+                                      ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Link Drive Disalin`
+                                      : `${icon('link-2', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Link Bukti Drive`
+                                  }
+                                </button>
+                              `
+                              : ''
+                          }
+                          ${
+                            savedAttachment.mimeType.startsWith('image/')
+                              ? `
+                                <button type="button" id="btn-copy-proof-img" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                                  ${
+                                    rm.copiedImg
+                                      ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Gambar Disalin`
+                                      : `${icon('copy', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Gambar Bukti`
+                                  }
+                                </button>
+                              `
+                              : ''
+                          }
+                          <a href="${escapeHtml(savedAttachment.dataUrl || savedAttachment.remoteUrl || '')}" download="${escapeHtml(savedAttachment.name)}" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0]">
+                            ${icon('download', 'h-3.5 w-3.5 text-[#8E1616]')}
+                            Unduh Bukti
+                          </a>
+                          ${
+                            canWebShareFiles
+                              ? `
+                                <button type="button" id="btn-share-proof-file" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                                  ${icon('share-2', 'h-3.5 w-3.5 text-[#8E1616]')}
+                                  Bagikan File
+                                </button>
+                              `
+                              : ''
+                          }
+                        </div>
+                      </div>
+                    `
+                    : ''
+                }
+
+                ${
+                  rm.shareFeedback
+                    ? `<p class="text-xs font-medium text-[#8E1616]">${escapeHtml(rm.shareFeedback)}</p>`
+                    : ''
+                }
+
+                <div class="flex flex-col gap-3 border-t border-[#8E1616]/10 pt-4">
+                  <div class="flex flex-wrap items-center gap-2.5">
+                    ${
+                      rm.sendToGroup
+                        ? `
+                          <a href="${escapeHtml(waShareTextUrl)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full bg-[#8E1616] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#731111] whitespace-nowrap shrink-0">
+                            ${icon('send', 'h-4 w-4')}
+                            Pilih Grup &amp; Kirim Teks Otomatis
+                          </a>
+                          <a href="${escapeHtml(WHATSAPP_GROUP_URL)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full border border-[#8E1616] bg-white px-5 py-2.5 text-sm font-semibold text-[#8E1616] transition-colors hover:bg-[#FFF0F0] whitespace-nowrap shrink-0">
+                            ${icon('users', 'h-4 w-4')}
+                            Buka Grup Tujuan
+                          </a>
+                        `
+                        : ''
+                    }
+                    ${
+                      rm.sendToPhone
+                        ? `
+                          <a href="${escapeHtml(waUrl)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 whitespace-nowrap shrink-0">
+                            ${icon('external-link', 'h-4 w-4')}
+                            Kirim ke WhatsApp Siswa (${escapeHtml(claim.nomorPonsel)})
+                          </a>
+                        `
+                        : ''
+                    }
+                  </div>
+                  <div class="flex justify-end">
+                    <button type="button" id="btn-refund-done" class="rounded-full border border-[#8E1616]/20 bg-white px-5 py-2 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                      Selesai
+                    </button>
+                  </div>
+                </div>
+              </div>
+            `
+            : `
+              <form id="refund-transfer-form" class="space-y-4">
+                ${
+                  rm.error
+                    ? `
+                      <div role="alert" class="flex items-start gap-2.5 rounded-xl border border-red-200 bg-red-50 p-3.5 text-xs text-red-800">
+                        ${icon('alert-circle', 'mt-0.5 h-4 w-4 shrink-0 text-red-600')}
+                        <span>${escapeHtml(rm.error)}</span>
+                      </div>
+                    `
+                    : ''
+                }
+
+                <div>
+                  <label for="refund-proof-input" class="block text-sm font-semibold text-[#3D0C0C]">
+                    Upload Bukti Transfer Pengembalian (JPG / PNG / PDF) <span class="text-[#8E1616]">*</span>
+                  </label>
+                  <input id="refund-proof-input" type="file" accept=".jpg,.jpeg,.png,.pdf,image/jpeg,image/png,application/pdf" class="sr-only" />
+                  ${
+                    !rm.refundProof
+                      ? `
+                        <label for="refund-proof-input" class="mt-1.5 flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-[#8E1616]/20 bg-[#FEF9F9] px-6 py-4 text-center transition-colors hover:border-[#8E1616]/50 hover:bg-[#FFF0F0]/50">
+                          ${icon('upload', 'h-5 w-5 text-[#8E1616]')}
+                          <span class="mt-2 text-sm font-semibold text-[#3D0C0C]">Pilih bukti transfer pengembalian dana</span>
+                          <span class="mt-1 text-xs text-[#8C5E5E]">JPG, PNG, atau PDF · Maksimal 5 MB</span>
+                        </label>
+                      `
+                      : `
+                        <div class="mt-1.5 flex items-center justify-between gap-4 rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-3">
+                          <div class="flex items-center gap-3 min-w-0">
+                            ${
+                              rm.refundProof.mimeType.startsWith('image/')
+                                ? `<img src="${escapeHtml(rm.refundProof.dataUrl)}" alt="Bukti pengembalian ${escapeHtml(rm.refundProof.name)}" referrerpolicy="no-referrer" class="h-11 w-11 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
+                                : `<div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-5 w-5')}</div>`
+                            }
+                            <div class="min-w-0">
+                              <p class="truncate text-sm font-semibold text-[#3D0C0C]">${escapeHtml(rm.refundProof.name)}</p>
+                              <p class="text-xs text-[#8C5E5E] tabular-nums">
+                                ${rm.refundProof.size > 0 ? `${formatFileSize(rm.refundProof.size)} · ` : ''}Siap dikirim
+                              </p>
+                            </div>
+                          </div>
+                          <button type="button" id="btn-remove-refund-proof" class="inline-flex items-center gap-1 rounded-full border border-[#8E1616]/20 bg-white px-3 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] hover:text-[#8E1616] cursor-pointer">
+                            ${icon('trash-2', 'h-3.5 w-3.5')}
+                            Ganti
+                          </button>
+                        </div>
+                      `
+                  }
+                </div>
+
+                <fieldset class="rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-4 space-y-2.5">
+                  <legend class="px-1 font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">
+                    Opsi Tujuan Pengiriman Bukti &amp; Pesan
+                  </legend>
+                  <label class="flex items-start gap-2.5 text-sm text-[#3D0C0C] cursor-pointer">
+                    <input id="chk-send-group" type="checkbox" ${rm.sendToGroup ? 'checked' : ''} class="mt-0.5 h-4 w-4 rounded border-[#8E1616]/30 accent-[#8E1616]" />
+                    <span>
+                      <strong class="font-semibold">Kirim ke Grup WhatsApp</strong>
+                      <span class="block font-mono text-[11px] text-[#7E5454] break-all">${escapeHtml(WHATSAPP_GROUP_URL)}</span>
+                    </span>
+                  </label>
+                  <label class="flex items-center gap-2.5 text-sm text-[#3D0C0C] cursor-pointer">
+                    <input id="chk-send-phone" type="checkbox" ${rm.sendToPhone ? 'checked' : ''} class="h-4 w-4 rounded border-[#8E1616]/30 accent-[#8E1616]" />
+                    <span>
+                      <strong class="font-semibold">Kirim ke Nomor Ponsel Siswa</strong>
+                      <span class="font-mono text-xs text-[#7E5454]">(${escapeHtml(claim.nomorPonsel)})</span>
+                    </span>
+                  </label>
+                </fieldset>
+
+                <div>
+                  <label for="refund-note" class="block text-sm font-semibold text-[#3D0C0C]">
+                    Catatan Internal / Referensi Bank (Opsional)
+                  </label>
+                  <input
+                    id="refund-note"
+                    type="text"
+                    value="${escapeHtml(rm.note)}"
+                    placeholder="Contoh: Transfer via BCA Bisnis Ref #99201"
+                    class="mt-1.5 block w-full rounded-xl border border-[#8E1616]/15 bg-white px-3.5 py-2 text-sm text-[#3D0C0C] placeholder:text-[#A37A7A] focus:border-[#8E1616] focus:outline-none focus:ring-2 focus:ring-[#8E1616]/15"
+                  />
+                </div>
+
+                <div>
+                  <label for="refund-wa-message" class="block text-sm font-semibold text-[#3D0C0C]">
+                    Pratinjau Pesan Rincian Klaim (Nama s.d. Nominal)
+                  </label>
+                  <textarea
+                    id="refund-wa-message"
+                    rows="8"
+                    class="mt-1.5 block w-full rounded-xl border border-[#8E1616]/15 bg-white px-3.5 py-2.5 text-xs leading-relaxed text-[#3D0C0C] focus:border-[#8E1616] focus:outline-none focus:ring-2 focus:ring-[#8E1616]/15"
+                  >${escapeHtml(rm.message)}</textarea>
+                </div>
+
+                <label class="flex items-center gap-2.5 text-sm text-[#3D0C0C] cursor-pointer">
+                  <input id="chk-mark-transferred" type="checkbox" ${rm.markAsTransferred ? 'checked' : ''} class="h-4 w-4 rounded border-[#8E1616]/30 accent-[#8E1616]" />
+                  Otomatis ubah status klaim menjadi <strong>Selesai / Ditransfer</strong>
+                </label>
+
+                <div class="flex flex-col-reverse gap-3 border-t border-[#8E1616]/10 pt-4 sm:flex-row sm:justify-end">
+                  <button type="button" id="btn-cancel-refund" class="rounded-full border border-[#8E1616]/20 bg-white px-5 py-2.5 text-sm font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                    Batal
+                  </button>
+                  <button type="submit" ${rm.isSaving ? 'disabled' : ''} class="inline-flex items-center justify-center gap-2 rounded-full bg-[#8E1616] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#731111] disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer">
+                    ${icon('send', 'h-4 w-4')}
+                    ${rm.isSaving ? 'Menyimpan & Menyiapkan...' : 'Simpan Bukti & Kirim'}
+                  </button>
+                </div>
+              </form>
+            `;
+
+          return `
+            <div role="dialog" aria-modal="true" aria-labelledby="refund-modal-title" class="fixed inset-0 z-50 flex items-center justify-center bg-[#3D0C0C]/45 p-4 backdrop-blur-[2px]">
+              <div class="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-[20px] border border-[#8E1616]/15 bg-white shadow-xl">
+                <div class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-[#8E1616]/10 bg-white px-6 py-4">
+                  <div>
+                    <p class="font-mono text-xs font-semibold text-[#8E1616] tabular-nums">${escapeHtml(claim.ticketNumber)}</p>
+                    <h2 id="refund-modal-title" class="text-lg font-extrabold tracking-tight text-[#3D0C0C]">
+                      Upload Bukti Transfer Klaim &amp; Kirim Pesan
+                    </h2>
+                  </div>
+                  <button type="button" id="btn-close-refund" aria-label="Tutup modal upload bukti transfer" class="rounded-full border border-[#8E1616]/15 p-2 text-[#8C5E5E] hover:bg-[#FFF0F0] hover:text-[#8E1616] cursor-pointer">
+                    ${icon('x', 'h-4 w-4')}
+                  </button>
+                </div>
+
+                <div class="p-6 space-y-5">
+                  ${
+                    rm.showSelector && !rm.completedRecord
+                      ? `
+                        <div>
+                          <label for="refund-ticket-selector" class="block text-sm font-semibold text-[#3D0C0C]">
+                            Pilih Tiket Pengajuan Siswa
+                          </label>
+                          <select id="refund-ticket-selector" class="mt-1.5 block w-full rounded-xl border border-[#8E1616]/15 bg-white px-3.5 py-2.5 text-sm text-[#3D0C0C] focus:border-[#8E1616] focus:outline-none focus:ring-2 focus:ring-[#8E1616]/15">
+                            ${rm.claims
+                              .map(
+                                (item) =>
+                                  `<option value="${escapeHtml(item.ticketNumber)}" ${item.ticketNumber === claim.ticketNumber ? 'selected' : ''}>${escapeHtml(item.ticketNumber)} — ${escapeHtml(item.namaSiswa)} (${escapeHtml(formatRupiah(item.nominalKlaim))}) · ${escapeHtml(item.status)}</option>`,
+                              )
+                              .join('')}
+                          </select>
+                        </div>
+                      `
+                      : ''
+                  }
+
+                  <div class="grid grid-cols-1 gap-4 rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-4 text-sm sm:grid-cols-2">
+                    <div>
+                      <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">
+                        Penerima &amp; Nomor Ponsel Terekam
+                      </p>
+                      <p class="mt-0.5 font-semibold text-[#3D0C0C]">${escapeHtml(claim.namaSiswa)}</p>
+                      <p class="font-mono text-xs font-semibold text-[#8E1616] tabular-nums">
+                        ${escapeHtml(claim.nomorPonsel)} (WA: +${escapeHtml(normalizedPhone)})
+                      </p>
+                      <p class="mt-0.5 text-xs text-[#7E5454] tabular-nums">
+                        ${escapeHtml(claim.cabang)} · Periode: ${escapeHtml((claim.periode || '').trim() || '-')}
+                      </p>
+                    </div>
+                    <div>
+                      <p class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">
+                        Rekening Tujuan &amp; Nominal
+                      </p>
+                      <p class="mt-0.5 font-mono font-bold text-[#8E1616] tabular-nums">${escapeHtml(formatRupiah(claim.nominalKlaim))}</p>
+                      <p class="text-xs text-[#7E5454]">
+                        ${escapeHtml(claim.namaBank)} · ${escapeHtml(claim.nomorRekening)} (a.n. ${escapeHtml(claim.namaPemilikRekening)})
+                      </p>
+                    </div>
+                  </div>
+
+                  ${bodyHtml}
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        function renderGasSetupModal() {
+          if (!state.showGasSetup || state.mode !== 'admin') return '';
+          const configured = isGasConfigured();
+          return `
+            <div role="dialog" aria-modal="true" aria-labelledby="gas-modal-title" class="fixed inset-0 z-50 flex items-center justify-center bg-[#3D0C0C]/45 p-4 backdrop-blur-[2px]">
+              <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-[20px] border border-[#8E1616]/15 bg-white shadow-xl">
+                <div class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-[#8E1616]/10 bg-white px-6 py-4">
+                  <div>
+                    <h2 id="gas-modal-title" class="text-lg font-extrabold tracking-tight text-[#3D0C0C]">
+                      Integrasi Google Apps Script (Sheets &amp; Drive)
+                    </h2>
+                    <p class="text-xs text-[#7E5454]">
+                      Status koneksi saat ini:
+                      <span class="${configured ? 'font-semibold text-emerald-700' : 'font-semibold text-[#8E1616]'}">
+                        ${configured ? 'Terhubung ke WEB_APP_URL' : 'Mode Penyimpanan Lokal (WEB_APP_URL belum diisi)'}
+                      </span>
+                    </p>
+                  </div>
+                  <button type="button" id="btn-close-gas" aria-label="Tutup panduan Apps Script" class="rounded-full border border-[#8E1616]/15 p-2 text-[#8C5E5E] hover:bg-[#FFF0F0] hover:text-[#8E1616] cursor-pointer">
+                    ${icon('x', 'h-4 w-4')}
+                  </button>
+                </div>
+
+                <div class="space-y-5 p-6 text-sm text-[#3D0C0C]">
+                  <div class="rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-4 space-y-2">
+                    <p class="font-semibold text-[#3D0C0C]">Langkah Konfigurasi:</p>
+                    <ol class="list-decimal pl-5 space-y-1.5 text-xs leading-relaxed text-[#7E5454]">
+                      <li>
+                        Buka Google Sheets baru, lalu klik <strong>Extensions &gt; Apps Script</strong> dan
+                        tempel skrip di bawah ini (isi <code>FOLDER_ID</code> dengan ID folder Google Drive Anda).
+                      </li>
+                      <li>
+                        Klik <strong>Deploy &gt; New deployment &gt; Web app</strong>, atur akses ke
+                        <strong>Anyone</strong>, lalu salin URL <code>/exec</code> yang dihasilkan.
+                      </li>
+                      <li>
+                        Tempel URL tersebut pada konstanta <code class="font-mono font-semibold text-[#8E1616]">WEB_APP_URL</code> di bagian atas bagian
+                        <code class="font-mono">&lt;script&gt;</code> di file <code class="font-mono">index.html</code>.
+                      </li>
+                    </ol>
+                    ${
+                      configured
+                        ? `<p class="pt-1 font-mono text-xs text-[#8E1616] break-all">WEB_APP_URL aktif: ${escapeHtml(WEB_APP_URL)}</p>`
+                        : ''
+                    }
+                  </div>
+
+                  <div class="space-y-2">
+                    <div class="flex items-center justify-between">
+                      <span class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">
+                        Template Google Apps Script (Code.gs)
+                      </span>
+                      <button type="button" id="btn-copy-gas-code" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                        ${
+                          state.gasCopied
+                            ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Skrip Tersalin`
+                            : `${icon('copy', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Skrip Code.gs`
+                        }
+                      </button>
+                    </div>
+                    <pre class="max-h-72 overflow-auto rounded-2xl border border-[#8E1616]/15 bg-[#2A0808] p-4 font-mono text-xs leading-relaxed text-[#FEF9F9]">${escapeHtml(GOOGLE_APPS_SCRIPT_TEMPLATE)}</pre>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
+        // ===================================================================
+        // FULL & PARTIAL RENDERING + EVENT BINDING
+        // ===================================================================
+        function render() {
+          let mainHtml = '';
+          if (state.mode === 'public') {
+            mainHtml = state.submittedClaim ? renderTicketReceipt() : renderPublicForm();
+          } else if (state.mode === 'admin-pin') {
+            mainHtml = renderAdminPinGate();
+          } else if (state.mode === 'admin') {
+            mainHtml = renderAdminDashboard();
+          }
+
+          rootEl.innerHTML = `
+            ${renderHeader()}
+            <main class="flex-1">${mainHtml}</main>
+            ${renderFooter()}
+            ${renderProofPreviewModal()}
+            ${renderRefundModal()}
+            ${renderGasSetupModal()}
+          `;
+
+          bindEvents();
+        }
+
+        function refreshAdminTableOnly() {
+          const tableContainer = document.getElementById('admin-table-container');
+          const countBadge = document.getElementById('admin-count-badge');
+          if (!tableContainer) return;
+          const filteredClaims = filterClaims(
+            state.claims,
+            state.searchQuery,
+            state.statusFilter,
+            state.branchFilter,
+          );
+          tableContainer.innerHTML = renderAdminTableBodyHtml(filteredClaims);
+          if (countBadge) {
+            countBadge.textContent = `Menampilkan ${filteredClaims.length} dari ${state.claims.length} data`;
+          }
+          const exportBtn = document.getElementById('btn-export-csv');
+          if (exportBtn) {
+            exportBtn.disabled = filteredClaims.length === 0;
+          }
+          bindAdminTableRowEvents();
+        }
+
+        function clearPublicFieldError(field) {
+          if (state.form.errors[field]) {
+            delete state.form.errors[field];
+            const errEl = document.getElementById(`err-${field}`);
+            if (errEl) {
+              errEl.textContent = '';
+              errEl.classList.add('hidden');
+            }
+            const inputId = field === 'namaBank' ? 'field-namaBank' : `field-${field}`;
+            const inputEl = document.getElementById(inputId);
+            if (inputEl) {
+              inputEl.setAttribute('aria-invalid', 'false');
+              inputEl.classList.remove('border-red-500', 'focus:ring-red-200');
+              inputEl.classList.add(
+                'border-[#8E1616]/15',
+                'focus:border-[#8E1616]',
+                'focus:ring-[#8E1616]/15',
+              );
+            }
+          }
+        }
+
+        function openRefundModal(initialClaim, showSelector) {
+          const selectable = state.claims.length > 0 ? state.claims : initialClaim ? [initialClaim] : [];
+          const picked =
+            initialClaim ||
+            selectable.find((c) => c.status === 'Disetujui') ||
+            selectable[0];
+          if (!picked) return;
+
+          state.refundModal = {
+            claims: selectable,
+            showSelector: Boolean(showSelector),
+            selectedTicket: picked.ticketNumber,
+            refundProof: picked.buktiTransferPengembalian || null,
+            note: picked.catatanPengembalian || '',
+            message: buildWhatsAppRefundMessage(
+              picked,
+              picked.buktiTransferPengembalian && picked.buktiTransferPengembalian.name,
+              picked.catatanPengembalian,
+            ),
+            sendToGroup: true,
+            sendToPhone: true,
+            markAsTransferred: true,
+            error: null,
+            isSaving: false,
+            completedRecord: null,
+            copiedMsg: false,
+            copiedImg: false,
+            copiedShareLink: false,
+            copiedDriveLink: false,
+            shareFeedback: null,
+          };
+          render();
+        }
+
+        async function loadAdminClaims() {
+          state.isLoading = true;
+          state.loadError = null;
+          render();
+          try {
+            state.claims = await fetchClaims();
+          } catch (err) {
+            state.loadError =
+              err instanceof Error ? err.message : 'Gagal memuat daftar pengajuan klaim.';
+          } finally {
+            state.isLoading = false;
+            render();
+          }
+        }
+
+        function bindAdminTableRowEvents() {
+          const tableContainer = document.getElementById('admin-table-container');
+          if (!tableContainer) return;
+
+          const retryBtn = document.getElementById('btn-retry-load');
+          if (retryBtn) {
+            retryBtn.addEventListener('click', () => void loadAdminClaims());
+          }
+
+          const resetBtn = document.getElementById('btn-reset-filters');
+          if (resetBtn) {
+            resetBtn.addEventListener('click', () => {
+              state.searchQuery = '';
+              state.statusFilter = 'Semua';
+              state.branchFilter = 'Semua';
+              render();
+            });
+          }
+
+          tableContainer.querySelectorAll('button[data-action="preview"]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              const ticket = btn.getAttribute('data-ticket');
+              const found = state.claims.find((c) => c.ticketNumber === ticket);
+              if (found) {
+                state.previewClaim = found;
+                state.previewTab = 'awal';
+                render();
+              }
+            });
+          });
+
+          tableContainer.querySelectorAll('button[data-action="refund"]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              const ticket = btn.getAttribute('data-ticket');
+              const found = state.claims.find((c) => c.ticketNumber === ticket);
+              if (found) {
+                openRefundModal(found, false);
+              }
+            });
+          });
+
+          tableContainer.querySelectorAll('select[data-action="status-change"]').forEach((sel) => {
+            sel.addEventListener('change', async () => {
+              const ticket = sel.getAttribute('data-ticket');
+              const nextStatus = sel.value;
+              const currentClaim = state.claims.find((c) => c.ticketNumber === ticket);
+              state.actionError = null;
+              state.updatingTicket = ticket;
+              render();
+              try {
+                const updated = await updateClaimStatus(ticket, nextStatus, currentClaim);
+                state.claims = state.claims.map((item) =>
+                  item.ticketNumber === ticket ? updated : item,
+                );
+              } catch (err) {
+                state.actionError =
+                  err instanceof Error ? err.message : 'Gagal memperbarui status pengajuan.';
+              } finally {
+                state.updatingTicket = null;
+                render();
+              }
+            });
+          });
+        }
+
+        function bindEvents() {
+          // Header controls
+          const brandLink = document.getElementById('brand-link');
+          if (brandLink) {
+            brandLink.addEventListener('click', (e) => {
+              e.preventDefault();
+              if (state.mode === 'admin-pin') {
+                state.mode = 'public';
+                render();
+              } else {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }
+            });
+          }
+
+          const enterAdminBtn = document.getElementById('btn-enter-admin');
+          if (enterAdminBtn) {
+            enterAdminBtn.addEventListener('click', () => {
+              state.mode = 'admin-pin';
+              state.pinInput = '';
+              state.pinShow = false;
+              state.pinError = null;
+              render();
+              const pinInput = document.getElementById('admin-pin-input');
+              if (pinInput) pinInput.focus();
+            });
+          }
+
+          const exitAdminBtn = document.getElementById('btn-exit-admin');
+          if (exitAdminBtn) {
+            exitAdminBtn.addEventListener('click', () => {
+              state.mode = 'public';
+              state.showGasSetup = false;
+              state.previewClaim = null;
+              state.refundModal = null;
+              render();
+            });
+          }
+
+          const headerGasBtn = document.getElementById('btn-header-gas');
+          if (headerGasBtn) {
+            headerGasBtn.addEventListener('click', () => {
+              state.showGasSetup = true;
+              render();
+            });
+          }
+
+          // Public Form events
+          const claimForm = document.getElementById('public-claim-form');
+          if (claimForm) {
+            const bindText = (id, key, transform) => {
+              const el = document.getElementById(id);
+              if (!el) return;
+              el.addEventListener('input', (ev) => {
+                let val = ev.target.value;
+                if (transform) {
+                  val = transform(val);
+                  if (ev.target.value !== val) {
+                    ev.target.value = val;
+                  }
+                }
+                state.form[key] = val;
+                clearPublicFieldError(key);
+              });
+            };
+
+            bindText('field-namaSiswa', 'namaSiswa');
+            bindText('field-nomorRegistrasi', 'nomorRegistrasi');
+            bindText('field-nomorPonsel', 'nomorPonsel');
+            bindText('field-programKursus', 'programKursus');
+            bindText('field-periode', 'periode');
+            bindText('field-nomorRekening', 'nomorRekening', (v) => v.replace(/[^0-9]/g, ''));
+            bindText('field-namaPemilikRekening', 'namaPemilikRekening', (v) => v.toUpperCase());
+            bindText('field-alasanKlaim', 'alasanKlaim');
+
+            const cabangEl = document.getElementById('field-cabang');
+            if (cabangEl) {
+              cabangEl.addEventListener('change', (ev) => {
+                state.form.cabang = ev.target.value;
+                clearPublicFieldError('cabang');
+              });
+            }
+
+            const bankEl = document.getElementById('field-namaBank');
+            const customBankEl = document.getElementById('field-customBank');
+            if (bankEl) {
+              bankEl.addEventListener('change', (ev) => {
+                state.form.selectedBank = ev.target.value;
+                clearPublicFieldError('namaBank');
+                if (customBankEl) {
+                  if (state.form.selectedBank === 'Bank Lainnya') {
+                    customBankEl.classList.remove('hidden');
+                    customBankEl.classList.add('block');
+                    customBankEl.focus();
+                  } else {
+                    customBankEl.classList.add('hidden');
+                    customBankEl.classList.remove('block');
+                  }
+                }
+              });
+            }
+            if (customBankEl) {
+              customBankEl.addEventListener('input', (ev) => {
+                state.form.customBank = ev.target.value;
+                clearPublicFieldError('namaBank');
+              });
+            }
+
+            const nominalEl = document.getElementById('field-nominalKlaim');
+            if (nominalEl) {
+              nominalEl.addEventListener('input', (ev) => {
+                const parsed = parseRupiahInput(ev.target.value);
+                state.form.nominalKlaim = parsed;
+                state.form.nominalDisplay = parsed > 0 ? formatRupiah(parsed) : '';
+                ev.target.value = state.form.nominalDisplay;
+                clearPublicFieldError('nominalKlaim');
+              });
+            }
+
+            const proofInputEl = document.getElementById('field-buktiTransferSebelumnya');
+            if (proofInputEl) {
+              proofInputEl.addEventListener('change', async (ev) => {
+                const file = ev.target.files && ev.target.files[0];
+                if (!file) return;
+
+                if (!ALLOWED_PROOF_MIME_TYPES.includes(file.type)) {
+                  state.form.errors.buktiTransferSebelumnya =
+                    'Format berkas tidak didukung. Gunakan file JPG, PNG, atau PDF.';
+                  ev.target.value = '';
+                  render();
+                  return;
+                }
+
+                if (file.size > MAX_PROOF_FILE_SIZE_BYTES) {
+                  state.form.errors.buktiTransferSebelumnya = 'Ukuran berkas maksimal 5 MB.';
+                  ev.target.value = '';
+                  render();
+                  return;
+                }
+
+                try {
+                  state.form.buktiFile = await fileToProofPayload(file);
+                  delete state.form.errors.buktiTransferSebelumnya;
+                } catch (err) {
+                  state.form.errors.buktiTransferSebelumnya =
+                    err instanceof Error ? err.message : 'Gagal memuat file bukti transfer.';
+                }
+                render();
+              });
+            }
+
+            const removeProofBtn = document.getElementById('btn-remove-public-proof');
+            if (removeProofBtn) {
+              removeProofBtn.addEventListener('click', () => {
+                state.form.buktiFile = null;
+                render();
+              });
+            }
+
+            claimForm.addEventListener('submit', async (ev) => {
+              ev.preventDefault();
+              state.form.submitError = null;
+              const f = state.form;
+              const resolvedBank =
+                f.selectedBank === 'Bank Lainnya' ? f.customBank.trim() : f.selectedBank;
+
+              const payload = {
+                namaSiswa: f.namaSiswa,
+                nomorRegistrasi: f.nomorRegistrasi,
+                nomorPonsel: f.nomorPonsel,
+                cabang: f.cabang,
+                programKursus: f.programKursus,
+                periode: f.periode,
+                namaBank: resolvedBank,
+                nomorRekening: f.nomorRekening,
+                namaPemilikRekening: f.namaPemilikRekening.toUpperCase(),
+                nominalKlaim: f.nominalKlaim,
+                alasanKlaim: f.alasanKlaim,
+                buktiTransferSebelumnya: f.buktiFile,
+              };
+
+              const validationErrors = validateClaimForm(payload);
+              if (Object.keys(validationErrors).length > 0) {
+                state.form.errors = validationErrors;
+                render();
+                const firstKey = Object.keys(validationErrors)[0];
+                const firstEl = document.getElementById(`field-${firstKey}`);
+                if (firstEl) firstEl.focus();
+                return;
+              }
+
+              state.form.isSubmitting = true;
+              render();
+              try {
+                const created = await submitClaim(payload);
+                state.submittedClaim = created;
+                state.receiptCopied = false;
+                // Reset form for next claim
+                state.form = {
+                  namaSiswa: '',
+                  nomorRegistrasi: '',
+                  nomorPonsel: '',
+                  cabang: '',
+                  programKursus: '',
+                  periode: '',
+                  selectedBank: '',
+                  customBank: '',
+                  nomorRekening: '',
+                  namaPemilikRekening: '',
+                  nominalKlaim: 0,
+                  nominalDisplay: '',
+                  buktiFile: null,
+                  alasanKlaim: '',
+                  errors: {},
+                  submitError: null,
+                  isSubmitting: false,
+                };
+              } catch (err) {
+                state.form.submitError =
+                  err instanceof Error
+                    ? err.message
+                    : 'Pengajuan gagal dikirim. Silakan coba beberapa saat lagi.';
+                state.form.isSubmitting = false;
+              }
+              render();
+            });
+          }
+
+          // Ticket Receipt events
+          const copyTicketBtn = document.getElementById('btn-copy-ticket');
+          if (copyTicketBtn && state.submittedClaim) {
+            copyTicketBtn.addEventListener('click', async () => {
+              try {
+                await navigator.clipboard.writeText(state.submittedClaim.ticketNumber);
+                state.receiptCopied = true;
+                render();
+                setTimeout(() => {
+                  if (state.receiptCopied) {
+                    state.receiptCopied = false;
+                    render();
+                  }
+                }, 2000);
+              } catch {
+                // Abaikan
+              }
+            });
+          }
+
+          const printReceiptBtn = document.getElementById('btn-print-receipt');
+          if (printReceiptBtn) {
+            printReceiptBtn.addEventListener('click', () => window.print());
+          }
+
+          const createAnotherBtn = document.getElementById('btn-create-another');
+          if (createAnotherBtn) {
+            createAnotherBtn.addEventListener('click', () => {
+              state.submittedClaim = null;
+              render();
+            });
+          }
+
+          // Admin PIN Gate events
+          const pinForm = document.getElementById('admin-pin-form');
+          if (pinForm) {
+            const pinInput = document.getElementById('admin-pin-input');
+            if (pinInput) {
+              pinInput.addEventListener('input', (ev) => {
+                state.pinInput = ev.target.value;
+                if (state.pinError) {
+                  state.pinError = null;
+                  const errEl = document.getElementById('err-admin-pin');
+                  if (errEl) errEl.classList.add('hidden');
+                  pinInput.setAttribute('aria-invalid', 'false');
+                  pinInput.classList.remove('border-red-500', 'focus:ring-red-200');
+                  pinInput.classList.add('border-[#8E1616]/15', 'focus:border-[#8E1616]', 'focus:ring-[#8E1616]/15');
+                }
+              });
+            }
+
+            const togglePinBtn = document.getElementById('btn-toggle-pin');
+            if (togglePinBtn) {
+              togglePinBtn.addEventListener('click', () => {
+                state.pinShow = !state.pinShow;
+                render();
+                const el = document.getElementById('admin-pin-input');
+                if (el) el.focus();
+              });
+            }
+
+            const cancelPinBtn = document.getElementById('btn-pin-cancel');
+            if (cancelPinBtn) {
+              cancelPinBtn.addEventListener('click', () => {
+                state.mode = 'public';
+                render();
+              });
+            }
+
+            pinForm.addEventListener('submit', (ev) => {
+              ev.preventDefault();
+              const val = state.pinInput.trim();
+              if (!val) {
+                state.pinError = 'Masukkan PIN administrator.';
+                render();
+                return;
+              }
+              if (val !== ADMIN_PIN) {
+                state.pinError = 'PIN tidak sesuai. Periksa kembali PIN akses Anda.';
+                render();
+                return;
+              }
+              state.pinError = null;
+              state.mode = 'admin';
+              void loadAdminClaims();
+            });
+          }
+
+          // Admin Dashboard events
+          if (state.mode === 'admin') {
+            const globalRefundBtn = document.getElementById('btn-global-refund');
+            if (globalRefundBtn) {
+              globalRefundBtn.addEventListener('click', () => openRefundModal(null, true));
+            }
+
+            const openGasBtn = document.getElementById('btn-open-gas');
+            if (openGasBtn) {
+              openGasBtn.addEventListener('click', () => {
+                state.showGasSetup = true;
+                render();
+              });
+            }
+
+            const reloadBtn = document.getElementById('btn-reload-claims');
+            if (reloadBtn) {
+              reloadBtn.addEventListener('click', () => void loadAdminClaims());
+            }
+
+            const exportCsvBtn = document.getElementById('btn-export-csv');
+            if (exportCsvBtn) {
+              exportCsvBtn.addEventListener('click', () => {
+                const filtered = filterClaims(
+                  state.claims,
+                  state.searchQuery,
+                  state.statusFilter,
+                  state.branchFilter,
+                );
+                const csvContent = buildClaimsCsv(filtered);
+                const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                const dateSlug = new Date().toISOString().slice(0, 10);
+                link.href = url;
+                link.setAttribute('download', `klaim-kelebihan-pembayaran-${dateSlug}.csv`);
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+                URL.revokeObjectURL(url);
+              });
+            }
+
+            const searchInput = document.getElementById('admin-search-input');
+            if (searchInput) {
+              searchInput.addEventListener('input', (ev) => {
+                state.searchQuery = ev.target.value;
+                refreshAdminTableOnly();
+              });
+            }
+
+            const branchSelect = document.getElementById('admin-branch-filter');
+            if (branchSelect) {
+              branchSelect.addEventListener('change', (ev) => {
+                state.branchFilter = ev.target.value;
+                refreshAdminTableOnly();
+              });
+            }
+
+            document.querySelectorAll('button[data-status-tab]').forEach((tabBtn) => {
+              tabBtn.addEventListener('click', () => {
+                state.statusFilter = tabBtn.getAttribute('data-status-tab') || 'Semua';
+                render();
+              });
+            });
+
+            bindAdminTableRowEvents();
+          }
+
+          // Proof Preview Modal events
+          if (state.previewClaim) {
+            const closePrev = document.getElementById('btn-close-preview');
+            if (closePrev) {
+              closePrev.addEventListener('click', () => {
+                state.previewClaim = null;
+                render();
+              });
+            }
+            document.querySelectorAll('button[data-preview-tab]').forEach((btn) => {
+              btn.addEventListener('click', () => {
+                state.previewTab = btn.getAttribute('data-preview-tab') || 'awal';
+                render();
+              });
+            });
+          }
+
+          // Refund Modal events
+          const rm = state.refundModal;
+          if (rm) {
+            const currentClaim =
+              rm.claims.find((c) => c.ticketNumber === rm.selectedTicket) || rm.claims[0];
+
+            const closeRefund = () => {
+              state.refundModal = null;
+              render();
+            };
+
+            const closeRefundBtn = document.getElementById('btn-close-refund');
+            if (closeRefundBtn) closeRefundBtn.addEventListener('click', closeRefund);
+
+            const cancelRefundBtn = document.getElementById('btn-cancel-refund');
+            if (cancelRefundBtn) cancelRefundBtn.addEventListener('click', closeRefund);
+
+            const doneRefundBtn = document.getElementById('btn-refund-done');
+            if (doneRefundBtn) doneRefundBtn.addEventListener('click', closeRefund);
+
+            const ticketSelector = document.getElementById('refund-ticket-selector');
+            if (ticketSelector) {
+              ticketSelector.addEventListener('change', (ev) => {
+                const nextTicket = ev.target.value;
+                const nextClaim = rm.claims.find((c) => c.ticketNumber === nextTicket);
+                if (nextClaim) {
+                  rm.selectedTicket = nextTicket;
+                  rm.refundProof = nextClaim.buktiTransferPengembalian || null;
+                  rm.note = nextClaim.catatanPengembalian || '';
+                  rm.message = buildWhatsAppRefundMessage(
+                    nextClaim,
+                    nextClaim.buktiTransferPengembalian && nextClaim.buktiTransferPengembalian.name,
+                    nextClaim.catatanPengembalian,
+                  );
+                  rm.completedRecord = null;
+                  rm.error = null;
+                  rm.shareFeedback = null;
+                  render();
+                }
+              });
+            }
+
+            const refundProofInput = document.getElementById('refund-proof-input');
+            if (refundProofInput) {
+              refundProofInput.addEventListener('change', async (ev) => {
+                const file = ev.target.files && ev.target.files[0];
+                if (!file) return;
+
+                if (!ALLOWED_PROOF_MIME_TYPES.includes(file.type)) {
+                  rm.error = 'Format file harus JPG, PNG, atau PDF.';
+                  ev.target.value = '';
+                  render();
+                  return;
+                }
+                if (file.size > MAX_PROOF_FILE_SIZE_BYTES) {
+                  rm.error = 'Ukuran berkas maksimal 5 MB.';
+                  ev.target.value = '';
+                  render();
+                  return;
+                }
+
+                try {
+                  const payload = await fileToProofPayload(file);
+                  rm.refundProof = payload;
+                  rm.message = buildWhatsAppRefundMessage(currentClaim, payload.name, rm.note);
+                  rm.error = null;
+                } catch (err) {
+                  rm.error = err instanceof Error ? err.message : 'Gagal membaca berkas.';
+                }
+                render();
+              });
+            }
+
+            const removeRefundProofBtn = document.getElementById('btn-remove-refund-proof');
+            if (removeRefundProofBtn) {
+              removeRefundProofBtn.addEventListener('click', () => {
+                rm.refundProof = null;
+                render();
+              });
+            }
+
+            const chkGroup = document.getElementById('chk-send-group');
+            if (chkGroup) {
+              chkGroup.addEventListener('change', (ev) => {
+                rm.sendToGroup = ev.target.checked;
+              });
+            }
+            const chkPhone = document.getElementById('chk-send-phone');
+            if (chkPhone) {
+              chkPhone.addEventListener('change', (ev) => {
+                rm.sendToPhone = ev.target.checked;
+              });
+            }
+            const chkMark = document.getElementById('chk-mark-transferred');
+            if (chkMark) {
+              chkMark.addEventListener('change', (ev) => {
+                rm.markAsTransferred = ev.target.checked;
+              });
+            }
+
+            const noteInput = document.getElementById('refund-note');
+            const msgTextarea = document.getElementById('refund-wa-message');
+            if (noteInput) {
+              noteInput.addEventListener('input', (ev) => {
+                rm.note = ev.target.value;
+                rm.message = buildWhatsAppRefundMessage(
+                  currentClaim,
+                  rm.refundProof && rm.refundProof.name,
+                  rm.note,
+                );
+                if (msgTextarea) {
+                  msgTextarea.value = rm.message;
+                }
+              });
+            }
+            if (msgTextarea) {
+              msgTextarea.addEventListener('input', (ev) => {
+                rm.message = ev.target.value;
+              });
+            }
+
+            const refundForm = document.getElementById('refund-transfer-form');
+            if (refundForm) {
+              refundForm.addEventListener('submit', async (ev) => {
+                ev.preventDefault();
+                if (!rm.refundProof) {
+                  rm.error = 'Unggah bukti transfer pengembalian terlebih dahulu.';
+                  render();
+                  return;
+                }
+                if (!rm.sendToGroup && !rm.sendToPhone) {
+                  rm.error =
+                    'Pilih minimal satu tujuan pengiriman (Grup WhatsApp atau Nomor Ponsel Siswa).';
+                  render();
+                  return;
+                }
+                if (!rm.message.trim()) {
+                  rm.error = 'Pesan notifikasi tidak boleh kosong.';
+                  render();
+                  return;
+                }
+
+                rm.error = null;
+                rm.isSaving = true;
+                render();
+                try {
+                  const updated = await uploadRefundProofAndNotify({
+                    claim: currentClaim,
+                    refundProof: rm.refundProof,
+                    message: rm.message.trim(),
+                    note: rm.note,
+                    markAsTransferred: rm.markAsTransferred,
+                    sendToGroup: rm.sendToGroup,
+                    sendToPhone: rm.sendToPhone,
+                  });
+
+                  state.claims = state.claims.map((item) =>
+                    item.ticketNumber === updated.ticketNumber ? updated : item,
+                  );
+                  rm.claims = rm.claims.map((item) =>
+                    item.ticketNumber === updated.ticketNumber ? updated : item,
+                  );
+                  rm.completedRecord = updated;
+                  const nextMsg = updated.pesanNotifikasiTerkirim || rm.message.trim();
+                  rm.message = nextMsg;
+                  if (updated.buktiTransferPengembalian) {
+                    rm.refundProof = updated.buktiTransferPengembalian;
+                  }
+                  if (rm.sendToGroup && navigator.clipboard && navigator.clipboard.writeText) {
+                    try {
+                      await navigator.clipboard.writeText(nextMsg);
+                      rm.copiedMsg = true;
+                      rm.shareFeedback =
+                        'Teks rincian klaim disalin ke clipboard. Siap ditempel (Ctrl+V) di Grup WhatsApp.';
+                    } catch {
+                      // Abaikan
+                    }
+                  }
+                } catch (err) {
+                  rm.error =
+                    err instanceof Error
+                      ? err.message
+                      : 'Gagal menyimpan bukti pengembalian dana.';
+                } finally {
+                  rm.isSaving = false;
+                }
+                render();
+              });
+            }
+
+            // Completed view action buttons
+            const copyMsgBtn = document.getElementById('btn-copy-wa-msg');
+            if (copyMsgBtn) {
+              copyMsgBtn.addEventListener('click', async () => {
+                const textToCopy =
+                  (rm.completedRecord && rm.completedRecord.pesanNotifikasiTerkirim) || rm.message;
+                try {
+                  await navigator.clipboard.writeText(textToCopy);
+                  rm.copiedMsg = true;
+                  rm.shareFeedback =
+                    'Teks rincian klaim (nama s.d. nominal) disalin. Tempel (Ctrl+V) di Grup WhatsApp.';
+                  render();
+                  setTimeout(() => {
+                    if (state.refundModal && state.refundModal.copiedMsg) {
+                      state.refundModal.copiedMsg = false;
+                      render();
+                    }
+                  }, 2500);
+                } catch {
+                  // Abaikan
+                }
+              });
+            }
+
+            const copyShareLinkBtn = document.getElementById('btn-copy-wa-share-link');
+            if (copyShareLinkBtn) {
+              copyShareLinkBtn.addEventListener('click', async () => {
+                const textToCopy =
+                  (rm.completedRecord && rm.completedRecord.pesanNotifikasiTerkirim) || rm.message;
+                try {
+                  await navigator.clipboard.writeText(buildWhatsAppShareTextUrl(textToCopy));
+                  rm.copiedShareLink = true;
+                  rm.shareFeedback =
+                    'Link pesan WA (wa.me/?text=...) disalin. Saat dibuka, rincian klaim langsung terisi otomatis.';
+                  render();
+                  setTimeout(() => {
+                    if (state.refundModal && state.refundModal.copiedShareLink) {
+                      state.refundModal.copiedShareLink = false;
+                      render();
+                    }
+                  }, 2500);
+                } catch {
+                  // Abaikan
+                }
+              });
+            }
+
+            const copyDriveLinkBtn = document.getElementById('btn-copy-drive-link');
+            if (copyDriveLinkBtn) {
+              copyDriveLinkBtn.addEventListener('click', async () => {
+                const att =
+                  (rm.completedRecord && rm.completedRecord.buktiTransferPengembalian) ||
+                  rm.refundProof;
+                if (!att || !att.remoteUrl) return;
+                try {
+                  await navigator.clipboard.writeText(att.remoteUrl);
+                  rm.copiedDriveLink = true;
+                  rm.shareFeedback = 'Tautan bukti transfer Google Drive disalin.';
+                  render();
+                  setTimeout(() => {
+                    if (state.refundModal && state.refundModal.copiedDriveLink) {
+                      state.refundModal.copiedDriveLink = false;
+                      render();
+                    }
+                  }, 2500);
+                } catch {
+                  // Abaikan
+                }
+              });
+            }
+
+            const copyImgBtn = document.getElementById('btn-copy-proof-img');
+            if (copyImgBtn) {
+              copyImgBtn.addEventListener('click', async () => {
+                const att =
+                  (rm.completedRecord && rm.completedRecord.buktiTransferPengembalian) ||
+                  rm.refundProof;
+                if (!att) return;
+                try {
+                  await copyImageProofToClipboard(att);
+                  rm.copiedImg = true;
+                  rm.shareFeedback =
+                    'Gambar bukti disalin ke clipboard (menggantikan teks). Tempel (Ctrl+V) gambar di grup, lalu salin teks rincian jika belum terkirim.';
+                  render();
+                  setTimeout(() => {
+                    if (state.refundModal && state.refundModal.copiedImg) {
+                      state.refundModal.copiedImg = false;
+                      render();
+                    }
+                  }, 3000);
+                } catch (err) {
+                  rm.shareFeedback =
+                    err instanceof Error
+                      ? err.message
+                      : 'Salin gambar tidak tersedia; gunakan tombol Unduh Bukti.';
+                  render();
+                }
+              });
+            }
+
+            const shareFileBtn = document.getElementById('btn-share-proof-file');
+            if (shareFileBtn) {
+              shareFileBtn.addEventListener('click', async () => {
+                const att =
+                  (rm.completedRecord && rm.completedRecord.buktiTransferPengembalian) ||
+                  rm.refundProof;
+                if (!att || !navigator.share) return;
+                const finalMsg =
+                  (rm.completedRecord && rm.completedRecord.pesanNotifikasiTerkirim) || rm.message;
+                try {
+                  const fileObj = await proofFileToFileObject(att);
+                  if (navigator.canShare && !navigator.canShare({ files: [fileObj] })) {
+                    rm.shareFeedback =
+                      'Perangkat tidak mendukung lampiran file langsung; gunakan Salin Gambar atau Unduh Bukti.';
+                    render();
+                    return;
+                  }
+                  await navigator.share({
+                    title: `Bukti Pengembalian ${currentClaim.ticketNumber}`,
+                    text: finalMsg,
+                    files: [fileObj],
+                  });
+                } catch (err) {
+                  if (!err || err.name !== 'AbortError') {
+                    rm.shareFeedback = 'Gagal membuka menu berbagi file perangkat.';
+                    render();
+                  }
+                }
+              });
+            }
+          }
+
+          // GAS Setup Modal events
+          if (state.showGasSetup) {
+            const closeGasBtn = document.getElementById('btn-close-gas');
+            if (closeGasBtn) {
+              closeGasBtn.addEventListener('click', () => {
+                state.showGasSetup = false;
+                render();
+              });
+            }
+
+            const copyGasBtn = document.getElementById('btn-copy-gas-code');
+            if (copyGasBtn) {
+              copyGasBtn.addEventListener('click', async () => {
+                try {
+                  await navigator.clipboard.writeText(GOOGLE_APPS_SCRIPT_TEMPLATE);
+                  state.gasCopied = true;
+                  render();
+                  setTimeout(() => {
+                    if (state.gasCopied) {
+                      state.gasCopied = false;
+                      render();
+                    }
+                  }, 2000);
+                } catch {
+                  // Abaikan
+                }
+              });
+            }
+          }
+        }
+
+        // Initial render
+        render();
+      })();
+    </script>
   </body>
 </html>

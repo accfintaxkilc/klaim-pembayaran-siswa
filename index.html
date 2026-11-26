@@ -162,15 +162,42 @@
 const FOLDER_ID = 'GANTI_DENGAN_ID_FOLDER_GOOGLE_DRIVE';
 const SHEET_NAME = 'KlaimPembayaran';
 
+function normHeader_(h) {
+  return String(h || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function findCol_(headers, aliases) {
+  for (let a = 0; a < aliases.length; a++) {
+    const target = normHeader_(aliases[a]);
+    for (let i = 0; i < headers.length; i++) {
+      if (normHeader_(headers[i]) === target) return i;
+    }
+  }
+  return -1;
+}
+
 function getOrCreateSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) {
+    const sheets = ss.getSheets();
+    for (let i = 0; i < sheets.length; i++) {
+      const candidate = sheets[i];
+      if (candidate.getLastRow() >= 1) {
+        const firstRow = candidate.getRange(1, 1, 1, Math.max(1, candidate.getLastColumn())).getValues()[0];
+        if (findCol_(firstRow, ['tiket', 'ticketid', 'notiket', 'namasiswa']) !== -1) {
+          sheet = candidate;
+          break;
+        }
+      }
+    }
+  }
+  if (!sheet) {
     sheet = ss.insertSheet(SHEET_NAME);
     sheet.appendRow([
       'ticketId', 'Tanggal Pengajuan', 'Diperbarui',
-      'namaSiswa', 'noRegistrasi', 'noPonsel', 'program',
-      'durasi', 'grade', 'namaBank', 'noRekening', 'namaPemilik',
+      'namaSiswa', 'noRegistrasi', 'noPonsel', 'cabang', 'program',
+      'periode', 'namaBank', 'noRekening', 'namaPemilik',
       'nominal', 'alasan', 'status',
       'fileUrl', 'fileName', 'mimeType',
       'refundUrl', 'refundFileName', 'refundMimeType',
@@ -180,56 +207,281 @@ function getOrCreateSheet_() {
   return sheet;
 }
 
+function isRealUrl_(val) {
+  return /^https?:\\/\\//i.test(String(val || '').trim());
+}
+
+function extractDriveIdFromUrl_(url) {
+  const s = String(url || '').trim();
+  if (!s) return '';
+  const m1 = s.match(/\\/file\\/d\\/([a-zA-Z0-9_-]{10,})/);
+  if (m1 && m1[1]) return m1[1];
+  const m2 = s.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
+  if (m2 && m2[1]) return m2[1];
+  const m3 = s.match(/googleusercontent\\.com\\/d\\/([a-zA-Z0-9_-]{10,})/);
+  if (m3 && m3[1]) return m3[1];
+  return '';
+}
+
+function extractCellUrl_(val, richText, formula) {
+  if (isRealUrl_(val)) return String(val).trim();
+  if (richText) {
+    const directLink = richText.getLinkUrl();
+    if (isRealUrl_(directLink)) return String(directLink).trim();
+    const runs = richText.getRuns ? richText.getRuns() : [];
+    for (let i = 0; i < runs.length; i++) {
+      const runLink = runs[i].getLinkUrl();
+      if (isRealUrl_(runLink)) return String(runLink).trim();
+    }
+  }
+  if (formula && typeof formula === 'string') {
+    const hm = formula.match(/=HYPERLINK\\(\\s*"([^"]+)"/i);
+    if (hm && hm[1] && isRealUrl_(hm[1])) return String(hm[1]).trim();
+  }
+  return '';
+}
+
+function ensurePublicShare_(file) {
+  try {
+    file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (err) {
+    // Abaikan jika permission sudah diatur / dibatasi policy domain
+  }
+}
+
+function buildFolderFileIndex_() {
+  const byName = {};
+  const list = [];
+  if (!FOLDER_ID || FOLDER_ID === 'GANTI_DENGAN_ID_FOLDER_GOOGLE_DRIVE') {
+    return { byName: byName, list: list };
+  }
+  try {
+    const folder = DriveApp.getFolderById(FOLDER_ID);
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      const f = files.next();
+      const name = String(f.getName() || '');
+      const id = f.getId();
+      const info = {
+        id: id,
+        name: name,
+        url: 'https://drive.google.com/file/d/' + id + '/view',
+        mimeType: f.getMimeType() || 'image/png',
+        file: f
+      };
+      byName[name.toLowerCase()] = info;
+      list.push(info);
+    }
+  } catch (err) {
+    // Abaikan jika FOLDER_ID tidak dapat diakses
+  }
+  return { byName: byName, list: list };
+}
+
+function findDriveFile_(fileName, ticketId, folderIndex) {
+  const cleanName = String(fileName || '').trim();
+  const cleanTicket = String(ticketId || '').trim();
+  if (folderIndex) {
+    if (cleanName && folderIndex.byName[cleanName.toLowerCase()]) {
+      const hit = folderIndex.byName[cleanName.toLowerCase()];
+      ensurePublicShare_(hit.file);
+      return hit;
+    }
+    if (cleanTicket) {
+      const prefixA = (cleanTicket + '_').toLowerCase();
+      for (let i = 0; i < folderIndex.list.length; i++) {
+        const item = folderIndex.list[i];
+        const lower = item.name.toLowerCase();
+        if (lower.indexOf(prefixA) === 0 && lower.indexOf('_refund') === -1) {
+          ensurePublicShare_(item.file);
+          return item;
+        }
+      }
+    }
+  }
+  if (cleanName) {
+    const it = DriveApp.getFilesByName(cleanName);
+    if (it.hasNext()) {
+      const f = it.next();
+      ensurePublicShare_(f);
+      return {
+        id: f.getId(),
+        name: f.getName(),
+        url: 'https://drive.google.com/file/d/' + f.getId() + '/view',
+        mimeType: f.getMimeType() || 'image/png',
+        file: f
+      };
+    }
+  }
+  return null;
+}
+
 function saveBase64ToDrive_(base64Data, fileName, mimeType, prefix) {
-  if (!base64Data) return { viewUrl: '', downloadUrl: '' };
+  if (!base64Data) return { viewUrl: '', downloadUrl: '', fileId: '', fullName: '' };
   const cleanBase64 = base64Data.indexOf(',') !== -1 ? base64Data.split(',')[1] : base64Data;
   const decoded = Utilities.base64Decode(cleanBase64);
-  const blob = Utilities.newBlob(decoded, mimeType || 'application/octet-stream', prefix + '_' + (fileName || 'bukti'));
+  const fullName = prefix + '_' + (fileName || 'bukti');
+  const blob = Utilities.newBlob(decoded, mimeType || 'image/png', fullName);
   const folder = DriveApp.getFolderById(FOLDER_ID);
   const file = folder.createFile(blob);
-  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  ensurePublicShare_(file);
   const fileId = file.getId();
   return {
-    viewUrl: file.getUrl(),
+    fileId: fileId,
+    fullName: fullName,
+    viewUrl: 'https://drive.google.com/file/d/' + fileId + '/view',
     downloadUrl: 'https://drive.google.com/uc?export=download&id=' + fileId
   };
 }
 
 function doGet(e) {
+  const action = e && e.parameter && e.parameter.action ? String(e.parameter.action) : '';
+  if (action === 'proxyImage') {
+    try {
+      let targetFile = null;
+      const reqId = e.parameter.id ? String(e.parameter.id).trim() : '';
+      const reqName = e.parameter.fileName ? String(e.parameter.fileName).trim() : '';
+      const reqTicket = e.parameter.ticketId ? String(e.parameter.ticketId).trim() : '';
+      if (reqId) {
+        targetFile = DriveApp.getFileById(reqId);
+        ensurePublicShare_(targetFile);
+      } else {
+        const idx = buildFolderFileIndex_();
+        const found = findDriveFile_(reqName, reqTicket, idx);
+        if (found) targetFile = found.file;
+      }
+      if (!targetFile) {
+        return ContentService
+          .createTextOutput(JSON.stringify({ ok: false, error: 'File tidak ditemukan di Google Drive.' }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+      const blob = targetFile.getBlob();
+      const bytes = blob.getBytes();
+      if (bytes.length > 10 * 1024 * 1024) {
+        return ContentService
+          .createTextOutput(JSON.stringify({ ok: false, error: 'Ukuran file melebihi batas proxy 10 MB.' }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+      const fileId = targetFile.getId();
+      const mimeType = blob.getContentType() || targetFile.getMimeType() || 'image/png';
+      return ContentService
+        .createTextOutput(JSON.stringify({
+          ok: true,
+          status: 'success',
+          fileId: fileId,
+          fileName: targetFile.getName(),
+          mimeType: mimeType,
+          fileUrl: 'https://drive.google.com/file/d/' + fileId + '/view',
+          dataUrl: 'data:' + mimeType + ';base64,' + Utilities.base64Encode(bytes)
+        }))
+        .setMimeType(ContentService.MimeType.JSON);
+    } catch (err) {
+      return ContentService
+        .createTextOutput(JSON.stringify({ ok: false, error: String(err && err.message ? err.message : err) }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+  }
+
   const sheet = getOrCreateSheet_();
-  const rows = sheet.getDataRange().getValues();
+  const range = sheet.getDataRange();
+  const rows = range.getValues();
+  if (rows.length <= 1) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, status: 'success', data: [] }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const richTexts = range.getRichTextValues();
+  const formulas = range.getFormulas();
+  const headers = rows[0];
+
+  const col = {
+    ticket: findCol_(headers, ['tiket', 'ticketid', 'notiket', 'nomortiket', 'ticketnumber']),
+    createdAt: findCol_(headers, ['waktu', 'tanggalpengajuan', 'createdat', 'timestamp', 'tanggal']),
+    updatedAt: findCol_(headers, ['diperbarui', 'updatedat']),
+    namaSiswa: findCol_(headers, ['namasiswa', 'namalengkap', 'nama']),
+    noRegistrasi: findCol_(headers, ['noregist', 'noregistrasi', 'nomorregistrasi', 'regist']),
+    noPonsel: findCol_(headers, ['noponsel', 'nomorponsel', 'nohp', 'nowa', 'whatsapp']),
+    cabang: findCol_(headers, ['cabang']),
+    program: findCol_(headers, ['program', 'programkursus', 'durasi']),
+    periode: findCol_(headers, ['periode', 'grade']),
+    namaBank: findCol_(headers, ['bank', 'namabank']),
+    noRekening: findCol_(headers, ['norekening', 'nomorrekening', 'rekening']),
+    namaPemilik: findCol_(headers, ['namarekening', 'namapemilik', 'namapemilikrekening', 'atasnama']),
+    nominal: findCol_(headers, ['nominal', 'nominalklaim', 'jumlah']),
+    alasan: findCol_(headers, ['alasan', 'alasanklaim', 'keterangan']),
+    status: findCol_(headers, ['status', 'statusklaim', 'persetujuanstatus']),
+    fileUrl: findCol_(headers, ['fileurl', 'buktipembayaransebelumnya', 'buktitransfersebelumnya', 'buktitransfer', 'buktipembayaran', 'buktiurl', 'proofurl', 'bukti']),
+    fileName: findCol_(headers, ['filename', 'namafile']),
+    mimeType: findCol_(headers, ['mimetype']),
+    refundUrl: findCol_(headers, ['refundurl', 'refundproofurl', 'buktipengembalian']),
+    refundFileName: findCol_(headers, ['refundfilename']),
+    refundMimeType: findCol_(headers, ['refundmimetype']),
+    catatan: findCol_(headers, ['catatanpengembalian']),
+    notifAt: findCol_(headers, ['waktunotifikasi', 'notifikasiterkirimat'])
+  };
+
+  let folderIndex = null;
   const data = [];
   for (let i = 1; i < rows.length; i++) {
     const r = rows[i];
-    if (!r[0]) continue;
+    const ticketVal = col.ticket !== -1 ? r[col.ticket] : r[0];
+    if (!ticketVal) continue;
+    const ticketStr = String(ticketVal).trim();
+
+    let proofVal = col.fileUrl !== -1 ? r[col.fileUrl] : '';
+    let proofUrl = col.fileUrl !== -1
+      ? extractCellUrl_(proofVal, richTexts[i][col.fileUrl], formulas[i][col.fileUrl])
+      : '';
+    let proofName = col.fileName !== -1 && r[col.fileName]
+      ? String(r[col.fileName])
+      : (!isRealUrl_(proofVal) && proofVal ? String(proofVal) : 'bukti-transfer');
+    let proofMime = col.mimeType !== -1 && r[col.mimeType] ? String(r[col.mimeType]) : '';
+
+    if (!proofUrl && (proofName !== 'bukti-transfer' || ticketStr)) {
+      if (!folderIndex) folderIndex = buildFolderFileIndex_();
+      const resolvedDrive = findDriveFile_(proofName !== 'bukti-transfer' ? proofName : '', ticketStr, folderIndex);
+      if (resolvedDrive) {
+        proofUrl = resolvedDrive.url;
+        if (proofName === 'bukti-transfer') proofName = resolvedDrive.name;
+        if (!proofMime) proofMime = resolvedDrive.mimeType;
+      }
+    }
+
+    const refundVal = col.refundUrl !== -1 ? r[col.refundUrl] : '';
+    const refundUrl = col.refundUrl !== -1
+      ? extractCellUrl_(refundVal, richTexts[i][col.refundUrl], formulas[i][col.refundUrl])
+      : '';
+
     data.push({
-      ticketId: String(r[0]),
-      createdAt: r[1],
-      updatedAt: r[2],
-      namaSiswa: r[3],
-      noRegistrasi: String(r[4]),
-      noPonsel: String(r[5]),
-      program: r[6],
-      durasi: r[7],
-      grade: r[8],
-      namaBank: r[9],
-      noRekening: String(r[10]),
-      namaPemilik: r[11],
-      nominal: Number(r[12]) || 0,
-      alasan: r[13],
-      status: r[14] || 'Menunggu Verifikasi',
-      fileUrl: r[15] || '',
-      fileName: r[16] || 'bukti-transfer',
-      mimeType: r[17] || 'image/png',
-      refundUrl: r[18] || '',
-      refundFileName: r[19] || '',
-      refundMimeType: r[20] || 'image/png',
-      catatanPengembalian: r[21] || '',
-      notifikasiTerkirimAt: r[22] || ''
+      ticketId: ticketStr,
+      createdAt: col.createdAt !== -1 ? r[col.createdAt] : '',
+      updatedAt: col.updatedAt !== -1 ? r[col.updatedAt] : '',
+      namaSiswa: col.namaSiswa !== -1 ? r[col.namaSiswa] : '',
+      noRegistrasi: col.noRegistrasi !== -1 ? String(r[col.noRegistrasi] || '') : '',
+      noPonsel: col.noPonsel !== -1 ? String(r[col.noPonsel] || '') : '',
+      cabang: col.cabang !== -1 ? r[col.cabang] : '',
+      program: col.program !== -1 ? r[col.program] : '',
+      periode: col.periode !== -1 ? r[col.periode] : '',
+      namaBank: col.namaBank !== -1 ? r[col.namaBank] : '',
+      noRekening: col.noRekening !== -1 ? String(r[col.noRekening] || '') : '',
+      namaPemilik: col.namaPemilik !== -1 ? r[col.namaPemilik] : '',
+      nominal: Number(col.nominal !== -1 ? r[col.nominal] : 0) || 0,
+      alasan: col.alasan !== -1 ? r[col.alasan] : '',
+      status: (col.status !== -1 && r[col.status]) ? String(r[col.status]) : 'Menunggu Verifikasi',
+      fileUrl: proofUrl,
+      driveFileId: extractDriveIdFromUrl_(proofUrl),
+      fileName: proofName,
+      mimeType: proofMime || 'image/png',
+      refundUrl: refundUrl,
+      refundFileName: col.refundFileName !== -1 ? (r[col.refundFileName] || '') : '',
+      refundMimeType: col.refundMimeType !== -1 ? (r[col.refundMimeType] || 'image/png') : 'image/png',
+      catatanPengembalian: col.catatan !== -1 ? (r[col.catatan] || '') : '',
+      notifikasiTerkirimAt: col.notifAt !== -1 ? (r[col.notifAt] || '') : ''
     });
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ ok: true, data: data.reverse() }))
+    .createTextOutput(JSON.stringify({ ok: true, status: 'success', data: data.reverse() }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -237,16 +489,22 @@ function doPost(e) {
   const payload = JSON.parse(e.postData.contents);
   const sheet = getOrCreateSheet_();
   const nowIso = new Date().toISOString();
+  const range = sheet.getDataRange();
+  const rows = range.getValues();
+  const headers = rows[0] || [];
+  const ticketCol = findCol_(headers, ['tiket', 'ticketid', 'notiket', 'nomortiket', 'ticketnumber']);
+  const statusCol = findCol_(headers, ['status', 'statusklaim', 'persetujuanstatus']);
+  const updatedCol = findCol_(headers, ['diperbarui', 'updatedat']);
 
   if (payload.action === 'updateStatus') {
-    const rows = sheet.getDataRange().getValues();
     for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][0]) === String(payload.ticketId)) {
+      const rowTicket = String(rows[i][ticketCol !== -1 ? ticketCol : 0] || '');
+      if (rowTicket === String(payload.ticketId)) {
         const rowNum = i + 1;
-        sheet.getRange(rowNum, 3).setValue(nowIso);
-        sheet.getRange(rowNum, 15).setValue(payload.newStatus);
+        if (updatedCol !== -1) sheet.getRange(rowNum, updatedCol + 1).setValue(nowIso);
+        if (statusCol !== -1) sheet.getRange(rowNum, statusCol + 1).setValue(payload.newStatus);
         return ContentService
-          .createTextOutput(JSON.stringify({ ok: true }))
+          .createTextOutput(JSON.stringify({ ok: true, status: 'success' }))
           .setMimeType(ContentService.MimeType.JSON);
       }
     }
@@ -256,20 +514,25 @@ function doPost(e) {
   }
 
   if (payload.action === 'uploadRefundProof') {
-    const rows = sheet.getDataRange().getValues();
     for (let i = 1; i < rows.length; i++) {
-      if (String(rows[i][0]) === String(payload.ticketId)) {
+      const rowTicket = String(rows[i][ticketCol !== -1 ? ticketCol : 0] || '');
+      if (rowTicket === String(payload.ticketId)) {
         const rowNum = i + 1;
         const savedRefund = saveBase64ToDrive_(payload.fileData, payload.fileName, payload.mimeType, payload.ticketId + '_refund');
-        sheet.getRange(rowNum, 3).setValue(nowIso);
-        if (payload.newStatus) sheet.getRange(rowNum, 15).setValue(payload.newStatus);
-        sheet.getRange(rowNum, 19).setValue(savedRefund.viewUrl);
-        sheet.getRange(rowNum, 20).setValue(payload.fileName || 'refund');
-        sheet.getRange(rowNum, 21).setValue(payload.mimeType || 'image/png');
-        sheet.getRange(rowNum, 22).setValue(payload.note || '');
-        sheet.getRange(rowNum, 23).setValue(nowIso);
+        if (updatedCol !== -1) sheet.getRange(rowNum, updatedCol + 1).setValue(nowIso);
+        if (payload.newStatus && statusCol !== -1) sheet.getRange(rowNum, statusCol + 1).setValue(payload.newStatus);
+        const refundUrlCol = findCol_(headers, ['refundurl', 'refundproofurl', 'buktipengembalian']);
+        const refundNameCol = findCol_(headers, ['refundfilename']);
+        const refundMimeCol = findCol_(headers, ['refundmimetype']);
+        const noteCol = findCol_(headers, ['catatanpengembalian']);
+        const notifCol = findCol_(headers, ['waktunotifikasi', 'notifikasiterkirimat']);
+        if (refundUrlCol !== -1) sheet.getRange(rowNum, refundUrlCol + 1).setValue(savedRefund.viewUrl);
+        if (refundNameCol !== -1) sheet.getRange(rowNum, refundNameCol + 1).setValue(payload.fileName || 'refund');
+        if (refundMimeCol !== -1) sheet.getRange(rowNum, refundMimeCol + 1).setValue(payload.mimeType || 'image/png');
+        if (noteCol !== -1) sheet.getRange(rowNum, noteCol + 1).setValue(payload.note || '');
+        if (notifCol !== -1) sheet.getRange(rowNum, notifCol + 1).setValue(nowIso);
         return ContentService
-          .createTextOutput(JSON.stringify({ ok: true, refundProofUrl: savedRefund.viewUrl, finalMessage: payload.message }))
+          .createTextOutput(JSON.stringify({ ok: true, status: 'success', refundProofUrl: savedRefund.viewUrl, finalMessage: payload.message }))
           .setMimeType(ContentService.MimeType.JSON);
       }
     }
@@ -286,7 +549,7 @@ function doPost(e) {
       const branchCode = m[2];
       let maxSeq = parseInt(m[3], 10) - 1;
       for (let i = 1; i < existingRows.length; i++) {
-        const rowTicket = String(existingRows[i][0] || '');
+        const rowTicket = String(existingRows[i][ticketCol !== -1 ? ticketCol : 0] || '');
         const rm = rowTicket.match(/^KLM-(\\d{8})-(\\d{2})(\\d{2,})$/);
         if (rm && rm[1] >= '20261124' && rm[2] === branchCode) {
           const seq = parseInt(rm[3], 10);
@@ -298,33 +561,48 @@ function doPost(e) {
     }
 
     const saved = saveBase64ToDrive_(payload.fileData, payload.fileName, payload.mimeType, finalTicketId + '_awal');
-    sheet.appendRow([
-      finalTicketId,
-      payload.createdAt || nowIso,
-      nowIso,
-      payload.namaSiswa,
-      payload.noRegistrasi,
-      payload.noPonsel,
-      payload.program,
-      payload.durasi,
-      payload.grade,
-      payload.namaBank,
-      payload.noRekening,
-      payload.namaPemilik,
-      payload.nominal,
-      payload.alasan,
-      payload.status || 'Menunggu Verifikasi',
-      saved.viewUrl,
-      payload.fileName || 'bukti-transfer',
-      payload.mimeType || 'image/png',
-      '', '', '', '', ''
-    ]);
+    const newRow = new Array(headers.length).fill('');
+    const setByAliases = function(aliases, value) {
+      const idx = findCol_(headers, aliases);
+      if (idx !== -1) newRow[idx] = value;
+    };
+
+    setByAliases(['tiket', 'ticketid', 'notiket', 'nomortiket', 'ticketnumber'], finalTicketId);
+    setByAliases(['waktu', 'tanggalpengajuan', 'createdat', 'timestamp', 'tanggal'], payload.createdAt || nowIso);
+    setByAliases(['diperbarui', 'updatedat'], nowIso);
+    setByAliases(['namasiswa', 'namalengkap', 'nama'], payload.namaSiswa || '');
+    setByAliases(['noregist', 'noregistrasi', 'nomorregistrasi', 'regist'], payload.noRegistrasi || '');
+    setByAliases(['noponsel', 'nomorponsel', 'nohp', 'nowa', 'whatsapp'], payload.noPonsel || '');
+    if (findCol_(headers, ['cabang']) !== -1) {
+      setByAliases(['cabang'], payload.cabang || payload.program || '');
+      setByAliases(['program', 'programkursus', 'durasi'], payload.programKursus || payload.durasi || '');
+      setByAliases(['periode', 'grade'], payload.periode || payload.grade || '');
+    } else {
+      setByAliases(['program'], payload.program || payload.cabang || '');
+      setByAliases(['durasi'], payload.durasi || payload.programKursus || '');
+      setByAliases(['grade', 'periode'], payload.grade || payload.periode || '');
+    }
+    setByAliases(['bank', 'namabank'], payload.namaBank || '');
+    setByAliases(['norekening', 'nomorrekening', 'rekening'], payload.noRekening || '');
+    setByAliases(['namarekening', 'namapemilik', 'namapemilikrekening', 'atasnama'], payload.namaPemilik || '');
+    setByAliases(['nominal', 'nominalklaim', 'jumlah'], payload.nominal || 0);
+    setByAliases(['alasan', 'alasanklaim', 'keterangan'], payload.alasan || '');
+    setByAliases(['status', 'statusklaim', 'persetujuanstatus'], payload.status || 'Menunggu Verifikasi');
+    // Simpan URL Google Drive asli (bukan sekadar nama file) agar pratinjau admin selalu dapat memuat gambar
+    setByAliases(['fileurl', 'buktipembayaransebelumnya', 'buktitransfersebelumnya', 'buktitransfer', 'buktipembayaran', 'buktiurl', 'proofurl', 'bukti'], saved.viewUrl);
+    setByAliases(['filename', 'namafile'], payload.fileName || 'bukti-transfer');
+    setByAliases(['mimetype'], payload.mimeType || 'image/png');
+
+    sheet.appendRow(newRow);
 
     return ContentService
       .createTextOutput(JSON.stringify({
         ok: true,
+        status: 'success',
         ticketId: finalTicketId,
-        proofUrl: saved.viewUrl
+        proofUrl: saved.viewUrl,
+        fileUrl: saved.viewUrl,
+        driveFileId: saved.fileId
       }))
       .setMimeType(ContentService.MimeType.JSON);
   } finally {
@@ -703,29 +981,100 @@ function doPost(e) {
           return lines.join('\n');
         }
 
+        function isRealUrl(val) {
+          return /^(https?:\/\/|data:|blob:)/i.test(String(val || '').trim());
+        }
+
+        function inferMimeTypeFromName(name, fallbackMime = 'image/png') {
+          const lower = String(name || '').trim().toLowerCase();
+          if (/\.jpe?g$/i.test(lower)) return 'image/jpeg';
+          if (/\.png$/i.test(lower)) return 'image/png';
+          if (/\.webp$/i.test(lower)) return 'image/webp';
+          if (/\.gif$/i.test(lower)) return 'image/gif';
+          if (/\.heic$/i.test(lower)) return 'image/heic';
+          if (/\.heif$/i.test(lower)) return 'image/heif';
+          if (/\.pdf$/i.test(lower)) return 'application/pdf';
+          return fallbackMime || 'image/png';
+        }
+
         function extractGoogleDriveFileId(url) {
           if (!url) return null;
-          const matchPath = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+          const str = String(url).trim();
+          if (!str) return null;
+          if (/\/drive\/(search|folders|my-drive)/i.test(str)) return null;
+          const matchPath = str.match(/\/file\/d\/([a-zA-Z0-9_-]{10,})/);
           if (matchPath && matchPath[1]) return matchPath[1];
-          const matchQuery = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+          const matchLh3 = str.match(/googleusercontent\.com\/d\/([a-zA-Z0-9_-]{10,})/);
+          if (matchLh3 && matchLh3[1]) return matchLh3[1];
+          const matchD = str.match(/drive\.google\.com\/(?:a\/[^/]+\/)?(?:file\/)?d\/([a-zA-Z0-9_-]{10,})/);
+          if (matchD && matchD[1]) return matchD[1];
+          const matchQuery = str.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
           if (matchQuery && matchQuery[1]) return matchQuery[1];
           return null;
         }
 
-        function getDriveRenderUrl(url, mimeType) {
-          const fileId = extractGoogleDriveFileId(url);
-          if (!fileId) return url;
-          if (mimeType === 'application/pdf') {
-            return `https://drive.google.com/file/d/${fileId}/preview`;
+        function getDriveCanonicalViewUrl(urlOrId) {
+          const str = String(urlOrId || '').trim();
+          if (!str) return '';
+          if (/^[a-zA-Z0-9_-]{18,}$/.test(str) && !str.includes('.')) {
+            return `https://drive.google.com/file/d/${str}/view`;
           }
-          return `https://drive.google.com/thumbnail?id=${fileId}&sz=w1600`;
+          const fileId = extractGoogleDriveFileId(str);
+          return fileId ? `https://drive.google.com/file/d/${fileId}/view` : (isRealUrl(str) ? str : '');
+        }
+
+        function getDriveDownloadUrl(urlOrId) {
+          const str = String(urlOrId || '').trim();
+          if (!str) return '';
+          if (/^[a-zA-Z0-9_-]{18,}$/.test(str) && !str.includes('.')) {
+            return `https://drive.google.com/uc?export=download&id=${str}`;
+          }
+          const fileId = extractGoogleDriveFileId(str);
+          return fileId ? `https://drive.google.com/uc?export=download&id=${fileId}` : (isRealUrl(str) ? str : '');
+        }
+
+        function getDrivePreviewIframeUrl(urlOrId) {
+          const str = String(urlOrId || '').trim();
+          if (!str) return '';
+          if (/^[a-zA-Z0-9_-]{18,}$/.test(str) && !str.includes('.')) {
+            return `https://drive.google.com/file/d/${str}/preview`;
+          }
+          const fileId = extractGoogleDriveFileId(str);
+          return fileId ? `https://drive.google.com/file/d/${fileId}/preview` : '';
+        }
+
+        function getDriveCandidateUrls(url, mimeType) {
+          const str = String(url || '').trim();
+          if (!isRealUrl(str)) return [];
+          if (str.startsWith('data:') || str.startsWith('blob:')) return [str];
+          const fileId = extractGoogleDriveFileId(str);
+          if (!fileId) return [str];
+          if (mimeType === 'application/pdf') {
+            return [`https://drive.google.com/file/d/${fileId}/preview`];
+          }
+          return [
+            `https://lh3.googleusercontent.com/d/${fileId}=w1600`,
+            `https://drive.google.com/thumbnail?id=${fileId}&sz=w1600`,
+            `https://drive.google.com/uc?export=view&id=${fileId}`,
+          ];
+        }
+
+        function getDriveRenderUrl(url, mimeType) {
+          const candidates = getDriveCandidateUrls(url, mimeType);
+          return candidates[0] || '';
         }
 
         function resolveProofPreviewUrl(proof) {
           if (!proof) return '';
-          const raw = proof.dataUrl || proof.remoteUrl || '';
+          const raw = isRealUrl(proof.dataUrl)
+            ? String(proof.dataUrl).trim()
+            : isRealUrl(proof.remoteUrl)
+              ? String(proof.remoteUrl).trim()
+              : proof.driveFileId
+                ? `https://drive.google.com/file/d/${proof.driveFileId}/view`
+                : '';
           if (!raw) return '';
-          if (raw.startsWith('data:')) return raw;
+          if (raw.startsWith('data:') || raw.startsWith('blob:')) return raw;
           const isPdf =
             proof.mimeType === 'application/pdf' ||
             String(proof.name || '').toLowerCase().endsWith('.pdf');
@@ -805,57 +1154,129 @@ function doPost(e) {
             pick('ticketId', 'ticketNumber', 'tiket', 'notiket', 'nomortiket', 'id') ?? '',
           );
 
-          const directProofUrl = pick(
+          const explicitUrlVal = pick(
             'fileUrl',
-            'buktiUrl',
+            'driveUrl',
             'proofUrl',
+            'buktiUrl',
             'linkBukti',
             'fileLink',
-            'driveUrl',
+            'downloadUrl',
+            'thumbnailUrl',
+            'url',
+          );
+          const proofColumnVal = pick(
             'buktiPembayaranSebelumnya',
             'buktiTransferSebelumnya',
             'buktiTransfer',
             'buktiPembayaran',
             'bukti',
-            'url',
           );
-          const fallbackDriveUrl =
-            directProofUrl ||
-            Object.values(raw).find(
-              (v) => typeof v === 'string' && /^https:\/\/(drive|docs)\.google\.com\//i.test(v),
-            ) ||
-            '';
-          const initialProofUrl =
-            (raw.buktiTransferSebelumnya &&
-              (raw.buktiTransferSebelumnya.remoteUrl || raw.buktiTransferSebelumnya.dataUrl)) ||
-            String(fallbackDriveUrl || '');
-          const initialProof =
-            raw.buktiTransferSebelumnya && typeof raw.buktiTransferSebelumnya === 'object'
-              ? raw.buktiTransferSebelumnya
-              : initialProofUrl
-                ? {
-                    name: String(pick('fileName', 'namaFile') || 'bukti-transfer'),
-                    mimeType: String(pick('mimeType') || 'image/png'),
-                    size: Number(pick('fileSize')) || 0,
-                    dataUrl: String(initialProofUrl),
-                    remoteUrl: String(initialProofUrl),
-                  }
-                : undefined;
+          const explicitDriveId = String(pick('driveFileId', 'fileId') || '').trim();
+          const anyDriveUrl = Object.values(raw).find(
+            (v) =>
+              typeof v === 'string' &&
+              /^https:\/\/(drive\.google\.com|docs\.google\.com|lh3\.googleusercontent\.com)\//i.test(
+                v.trim(),
+              ) &&
+              Boolean(extractGoogleDriveFileId(v.trim())),
+          );
 
-          const refundUrl =
-            (raw.buktiTransferPengembalian &&
-              (raw.buktiTransferPengembalian.remoteUrl || raw.buktiTransferPengembalian.dataUrl)) ||
-            String(pick('refundUrl', 'refundProofUrl', 'buktiPengembalian') || '');
+          const resolvedInitialUrl = isRealUrl(explicitUrlVal)
+            ? String(explicitUrlVal).trim()
+            : isRealUrl(proofColumnVal)
+              ? String(proofColumnVal).trim()
+              : anyDriveUrl
+                ? String(anyDriveUrl).trim()
+                : /^[a-zA-Z0-9_-]{18,}$/.test(explicitDriveId)
+                  ? `https://drive.google.com/file/d/${explicitDriveId}/view`
+                  : '';
+
+          const rawFileNameVal = pick('fileName', 'namaFile');
+          const resolvedInitialName =
+            rawFileNameVal && !isRealUrl(rawFileNameVal)
+              ? String(rawFileNameVal).trim()
+              : proofColumnVal && !isRealUrl(proofColumnVal)
+                ? String(proofColumnVal).trim()
+                : 'bukti-transfer';
+
+          const resolvedDriveFileId =
+            extractGoogleDriveFileId(resolvedInitialUrl) ||
+            (/^[a-zA-Z0-9_-]{18,}$/.test(explicitDriveId) ? explicitDriveId : '');
+
+          const existingInitialObj =
+            raw.buktiTransferSebelumnya && typeof raw.buktiTransferSebelumnya === 'object'
+              ? {
+                  ...raw.buktiTransferSebelumnya,
+                  name: raw.buktiTransferSebelumnya.name || resolvedInitialName,
+                  mimeType:
+                    raw.buktiTransferSebelumnya.mimeType ||
+                    inferMimeTypeFromName(
+                      raw.buktiTransferSebelumnya.name || resolvedInitialName,
+                      'image/png',
+                    ),
+                  dataUrl: isRealUrl(raw.buktiTransferSebelumnya.dataUrl)
+                    ? raw.buktiTransferSebelumnya.dataUrl
+                    : isRealUrl(raw.buktiTransferSebelumnya.remoteUrl)
+                      ? raw.buktiTransferSebelumnya.remoteUrl
+                      : resolvedInitialUrl,
+                  remoteUrl: isRealUrl(raw.buktiTransferSebelumnya.remoteUrl)
+                    ? raw.buktiTransferSebelumnya.remoteUrl
+                    : resolvedInitialUrl,
+                  driveFileId:
+                    raw.buktiTransferSebelumnya.driveFileId || resolvedDriveFileId,
+                }
+              : null;
+
+          const initialProof =
+            existingInitialObj ||
+            (resolvedInitialUrl || resolvedInitialName !== 'bukti-transfer'
+              ? {
+                  name: resolvedInitialName,
+                  mimeType: String(
+                    pick('mimeType') || inferMimeTypeFromName(resolvedInitialName, 'image/png'),
+                  ),
+                  size: Number(pick('fileSize')) || 0,
+                  dataUrl: resolvedInitialUrl,
+                  remoteUrl: resolvedInitialUrl,
+                  driveFileId: resolvedDriveFileId,
+                }
+              : undefined);
+
+          const rawRefundVal = pick('refundUrl', 'refundProofUrl', 'buktiPengembalian');
+          const resolvedRefundUrl = isRealUrl(rawRefundVal) ? String(rawRefundVal).trim() : '';
+          const rawRefundNameVal = pick('refundFileName');
+          const resolvedRefundName =
+            rawRefundNameVal && !isRealUrl(rawRefundNameVal)
+              ? String(rawRefundNameVal).trim()
+              : rawRefundVal && !isRealUrl(rawRefundVal)
+                ? String(rawRefundVal).trim()
+                : 'bukti-pengembalian';
+
           const refundProof =
             raw.buktiTransferPengembalian && typeof raw.buktiTransferPengembalian === 'object'
-              ? raw.buktiTransferPengembalian
-              : refundUrl
+              ? {
+                  ...raw.buktiTransferPengembalian,
+                  dataUrl: isRealUrl(raw.buktiTransferPengembalian.dataUrl)
+                    ? raw.buktiTransferPengembalian.dataUrl
+                    : isRealUrl(raw.buktiTransferPengembalian.remoteUrl)
+                      ? raw.buktiTransferPengembalian.remoteUrl
+                      : resolvedRefundUrl,
+                  remoteUrl: isRealUrl(raw.buktiTransferPengembalian.remoteUrl)
+                    ? raw.buktiTransferPengembalian.remoteUrl
+                    : resolvedRefundUrl,
+                }
+              : resolvedRefundUrl || resolvedRefundName !== 'bukti-pengembalian'
                 ? {
-                    name: String(pick('refundFileName') || 'bukti-pengembalian'),
-                    mimeType: String(pick('refundMimeType') || 'image/png'),
+                    name: resolvedRefundName,
+                    mimeType: String(
+                      pick('refundMimeType') ||
+                        inferMimeTypeFromName(resolvedRefundName, 'image/png'),
+                    ),
                     size: 0,
-                    dataUrl: String(refundUrl),
-                    remoteUrl: String(refundUrl),
+                    dataUrl: resolvedRefundUrl,
+                    remoteUrl: resolvedRefundUrl,
+                    driveFileId: extractGoogleDriveFileId(resolvedRefundUrl) || '',
                   }
                 : undefined;
 
@@ -1252,8 +1673,55 @@ function doPost(e) {
           };
         }
 
+        const gasProofCache = new Map();
+
+        async function fetchGasProofProxy(params) {
+          if (!isGasConfigured()) return null;
+          const id = String((params && params.id) || '').trim();
+          const fileName = String((params && params.fileName) || '').trim();
+          const ticketId = String((params && params.ticketId) || '').trim();
+          const cacheKey = `${id}|${fileName}|${ticketId}`;
+          if (gasProofCache.has(cacheKey)) return gasProofCache.get(cacheKey);
+          try {
+            const sep = WEB_APP_URL.includes('?') ? '&' : '?';
+            const qs = new URLSearchParams({ action: 'proxyImage' });
+            if (id) qs.set('id', id);
+            if (fileName) qs.set('fileName', fileName);
+            if (ticketId) qs.set('ticketId', ticketId);
+            const controller =
+              typeof AbortController !== 'undefined' ? new AbortController() : null;
+            const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
+            try {
+              const response = await fetch(`${WEB_APP_URL}${sep}${qs.toString()}`, {
+                method: 'GET',
+                redirect: 'follow',
+                ...(controller ? { signal: controller.signal } : {}),
+              });
+              if (!response.ok) return null;
+              const rawText = await response.text();
+              const res = parseGasJsonResponse(rawText, response.status);
+              if (res && res.ok === true && (res.dataUrl || res.fileUrl)) {
+                gasProofCache.set(cacheKey, res);
+                return res;
+              }
+            } finally {
+              if (timer) clearTimeout(timer);
+            }
+          } catch {
+            // Abaikan jika Apps Script versi lama belum mendukung proxyImage
+          }
+          gasProofCache.set(cacheKey, null);
+          return null;
+        }
+
         async function proofFileToFileObject(proof) {
-          const targetUrl = resolveProofPreviewUrl(proof) || proof.dataUrl || proof.remoteUrl;
+          const targetUrl =
+            resolveProofPreviewUrl(proof) ||
+            (proof && isRealUrl(proof.dataUrl) ? proof.dataUrl : '') ||
+            (proof && isRealUrl(proof.remoteUrl) ? proof.remoteUrl : '');
+          if (!targetUrl) {
+            throw new Error('URL file bukti transfer tidak tersedia.');
+          }
           const response = await fetch(targetUrl);
           const blob = await response.blob();
           return new File([blob], proof.name, { type: proof.mimeType || blob.type });
@@ -1263,21 +1731,41 @@ function doPost(e) {
           if (!proof.mimeType.startsWith('image/') || !navigator.clipboard || !navigator.clipboard.write) {
             throw new Error('Browser tidak mendukung salin gambar langsung.');
           }
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          const srcUrl = resolveProofPreviewUrl(proof) || proof.dataUrl || proof.remoteUrl;
-          await new Promise((resolve, reject) => {
-            img.onload = () => resolve();
-            img.onerror = () => reject(new Error('Gagal memuat gambar lampiran.'));
-            img.src = srcUrl;
-          });
+          const rawUrl =
+            (isRealUrl(proof.dataUrl) ? proof.dataUrl : '') ||
+            (isRealUrl(proof.remoteUrl) ? proof.remoteUrl : '');
+          const candidates = getDriveCandidateUrls(rawUrl, proof.mimeType);
+          const srcList = candidates.length > 0 ? candidates : rawUrl ? [rawUrl] : [];
+          if (srcList.length === 0) {
+            throw new Error('Tautan gambar bukti transfer belum tersedia.');
+          }
+
+          let loadedImg = null;
+          for (const candidateUrl of srcList) {
+            try {
+              const img = new Image();
+              img.crossOrigin = 'anonymous';
+              await new Promise((resolve, reject) => {
+                img.onload = () => resolve();
+                img.onerror = () => reject(new Error('Gagal memuat gambar lampiran.'));
+                img.src = candidateUrl;
+              });
+              loadedImg = img;
+              break;
+            } catch {
+              // Coba URL kandidat berikutnya
+            }
+          }
+          if (!loadedImg) {
+            throw new Error('Gagal memuat gambar lampiran.');
+          }
 
           const canvas = document.createElement('canvas');
-          canvas.width = img.naturalWidth || 800;
-          canvas.height = img.naturalHeight || 600;
+          canvas.width = loadedImg.naturalWidth || 800;
+          canvas.height = loadedImg.naturalHeight || 600;
           const ctx = canvas.getContext('2d');
           if (!ctx) throw new Error('Kanvas tidak tersedia.');
-          ctx.drawImage(img, 0, 0);
+          ctx.drawImage(loadedImg, 0, 0);
 
           const pngBlob = await new Promise((resolve, reject) => {
             canvas.toBlob((blob) => {
@@ -2400,38 +2888,136 @@ function doPost(e) {
           `;
         }
 
-        function renderProofViewer(title, file) {
+        function renderProofViewer(title, file, ticketNumber) {
           if (!file) {
             return `<div class="rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-6 text-center text-sm text-[#8C5E5E]">Lampiran bukti transfer belum tersedia.</div>`;
           }
+          const hasImageExt = /\.(jpe?g|png|webp|gif|heic|heif)$/i.test(String(file.name || ''));
           const isPdf =
-            file.mimeType === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
-          const rawUrl = file.dataUrl || file.remoteUrl || '';
-          const renderUrl = rawUrl.startsWith('data:')
-            ? rawUrl
-            : getDriveRenderUrl(rawUrl, isPdf ? 'application/pdf' : file.mimeType);
+            !hasImageExt &&
+            (file.mimeType === 'application/pdf' ||
+              String(file.name || '').toLowerCase().endsWith('.pdf'));
 
-          let viewerHtml = `<div class="flex h-48 items-center justify-center text-sm text-[#8C5E5E]">Pratinjau tidak tersedia.</div>`;
-          if (isPdf) {
-            viewerHtml = renderUrl
-              ? `<iframe title="${escapeHtml(title)}" src="${escapeHtml(renderUrl)}" class="h-80 w-full bg-white"></iframe>`
+          const rawDataUrl = isRealUrl(file.dataUrl) ? String(file.dataUrl).trim() : '';
+          const rawRemoteUrl = isRealUrl(file.remoteUrl) ? String(file.remoteUrl).trim() : '';
+          const rawUrl = rawDataUrl || rawRemoteUrl || (file.driveFileId ? `https://drive.google.com/file/d/${file.driveFileId}/view` : '');
+          const driveId = file.driveFileId || extractGoogleDriveFileId(rawUrl) || '';
+          const openDriveUrl = rawRemoteUrl
+            ? getDriveCanonicalViewUrl(rawRemoteUrl)
+            : driveId
+              ? getDriveCanonicalViewUrl(driveId)
+              : '';
+          const downloadUrl = driveId ? getDriveDownloadUrl(driveId) : rawUrl;
+          const iframePreviewUrl = driveId ? getDrivePreviewIframeUrl(driveId) : '';
+          const candidates = rawUrl ? getDriveCandidateUrls(rawUrl, isPdf ? 'application/pdf' : file.mimeType) : [];
+          const driveSearchUrl = file.name
+            ? `https://drive.google.com/drive/search?q=${encodeURIComponent(file.name)}`
+            : '';
+
+          let viewerHtml = '';
+          if (!rawUrl) {
+            viewerHtml = `
+              <div
+                data-proof-missing-url
+                data-ticket="${escapeHtml(ticketNumber || '')}"
+                data-file-name="${escapeHtml(file.name || '')}"
+                class="flex flex-col items-center justify-center gap-3 p-6 text-center text-sm text-[#7E5454]"
+              >
+                ${icon('file-text', 'h-10 w-10 text-[#8E1616]')}
+                <div class="space-y-1 max-w-lg">
+                  <p class="font-semibold text-[#3D0C0C] break-all">${escapeHtml(file.name || 'bukti-transfer')}</p>
+                  <p data-proof-lookup-status class="text-xs leading-relaxed text-[#7E5454]">
+                    Data dari Google Sheet hanya mencantumkan nama file tanpa tautan Google Drive langsung.
+                    Klik tombol di bawah untuk mencari file di Google Drive atau perbarui skrip Apps Script agar pratinjau termuat otomatis.
+                  </p>
+                </div>
+                <div class="flex flex-wrap items-center justify-center gap-2 pt-1">
+                  ${
+                    driveSearchUrl
+                      ? `
+                        <a
+                          href="${escapeHtml(driveSearchUrl)}"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          class="inline-flex items-center gap-1.5 rounded-full bg-[#8E1616] px-4 py-2 text-xs font-semibold text-white hover:bg-[#731111] whitespace-nowrap shrink-0"
+                        >
+                          ${icon('search', 'h-3.5 w-3.5')}
+                          Cari File di Google Drive
+                        </a>
+                      `
+                      : ''
+                  }
+                  <button
+                    type="button"
+                    data-action="open-gas-from-preview"
+                    class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/25 bg-white px-4 py-2 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    ${icon('settings', 'h-3.5 w-3.5 text-[#8E1616]')}
+                    Perbarui Skrip Apps Script
+                  </button>
+                </div>
+              </div>
+            `;
+          } else if (isPdf) {
+            viewerHtml = iframePreviewUrl || rawUrl
+              ? `<iframe title="${escapeHtml(title)}" src="${escapeHtml(iframePreviewUrl || rawUrl)}" class="h-96 w-full bg-white" referrerpolicy="no-referrer"></iframe>`
               : `
                 <div class="flex h-56 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-[#7E5454]">
                   ${icon('file-text', 'h-10 w-10 text-[#8E1616]')}
                   <p class="font-semibold text-[#3D0C0C]">${escapeHtml(file.name)}</p>
-                  <p class="text-xs text-[#8C5E5E]">Gunakan tombol Unduh atau Buka Drive untuk melihat dokumen PDF ini.</p>
+                  <p class="text-xs text-[#8C5E5E]">Gunakan tombol Unduh atau Buka Drive untuk melihat dokumen ini.</p>
                 </div>
               `;
-          } else if (renderUrl) {
-            viewerHtml = `<img src="${escapeHtml(renderUrl)}" alt="${escapeHtml(title)}" referrerpolicy="no-referrer" class="max-h-96 w-full object-contain bg-white p-2" />`;
+          } else {
+            const firstSrc = candidates[0] || rawUrl;
+            viewerHtml = `
+              <div
+                data-proof-stage
+                data-drive-id="${escapeHtml(driveId)}"
+                data-file-name="${escapeHtml(file.name || '')}"
+                data-ticket="${escapeHtml(ticketNumber || '')}"
+              >
+                <img
+                  data-proof-img
+                  data-candidates="${escapeHtml(JSON.stringify(candidates))}"
+                  data-candidate-idx="0"
+                  src="${escapeHtml(firstSrc)}"
+                  alt="${escapeHtml(title)}"
+                  referrerpolicy="no-referrer"
+                  class="max-h-[420px] w-full object-contain bg-white p-2"
+                />
+                <div data-proof-iframe-box class="hidden">
+                  ${
+                    iframePreviewUrl
+                      ? `<iframe data-proof-iframe title="${escapeHtml(title)}" data-src="${escapeHtml(iframePreviewUrl)}" class="h-96 w-full bg-white" referrerpolicy="no-referrer"></iframe>`
+                      : ''
+                  }
+                </div>
+                <div data-proof-error-box class="hidden flex-col items-center justify-center gap-2 p-6 text-center text-sm text-[#7E5454]">
+                  ${icon('alert-circle', 'h-8 w-8 text-[#8E1616]')}
+                  <p class="font-semibold text-[#3D0C0C]">Pratinjau langsung tidak dapat dimuat di browser.</p>
+                  <p class="text-xs text-[#8C5E5E]">Pastikan akses file Google Drive disetel ke "Anyone with the link" atau buka langsung di tab baru.</p>
+                  ${
+                    openDriveUrl
+                      ? `
+                        <a href="${escapeHtml(openDriveUrl)}" target="_blank" rel="noopener noreferrer" class="mt-1 inline-flex items-center gap-1.5 rounded-full bg-[#8E1616] px-4 py-2 text-xs font-semibold text-white hover:bg-[#731111]">
+                          ${icon('external-link', 'h-3.5 w-3.5')}
+                          Buka Langsung di Google Drive
+                        </a>
+                      `
+                      : ''
+                  }
+                </div>
+              </div>
+            `;
           }
 
           return `
             <div class="space-y-3">
               <div class="flex flex-wrap items-center justify-between gap-2">
-                <div>
+                <div class="min-w-0">
                   <h3 class="text-sm font-bold text-[#3D0C0C]">${escapeHtml(title)}</h3>
-                  <p class="text-xs text-[#8C5E5E] tabular-nums">
+                  <p class="text-xs text-[#8C5E5E] tabular-nums break-all">
                     ${escapeHtml(file.name)}${file.size > 0 ? ` · ${formatFileSize(file.size)}` : ''}
                   </p>
                 </div>
@@ -2440,18 +3026,18 @@ function doPost(e) {
                     ? `
                       <div class="flex items-center gap-2">
                         <a
-                          href="${escapeHtml(rawUrl)}"
-                          download="${escapeHtml(file.name)}"
+                          href="${escapeHtml(downloadUrl)}"
+                          ${rawDataUrl.startsWith('data:') ? `download="${escapeHtml(file.name)}"` : 'target="_blank" rel="noopener noreferrer"'}
                           class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] whitespace-nowrap shrink-0"
                         >
                           ${icon('download', 'h-3.5 w-3.5 text-[#8E1616]')}
                           Unduh
                         </a>
                         ${
-                          file.remoteUrl
+                          openDriveUrl
                             ? `
                               <a
-                                href="${escapeHtml(file.remoteUrl)}"
+                                href="${escapeHtml(openDriveUrl)}"
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] whitespace-nowrap shrink-0"
@@ -2544,8 +3130,16 @@ function doPost(e) {
 
                   ${
                     showRefund && claim.buktiTransferPengembalian
-                      ? renderProofViewer('Bukti Transfer Pengembalian Dana (Dari Finance)', claim.buktiTransferPengembalian)
-                      : renderProofViewer('Bukti Transfer Sebelumnya (Dari Siswa)', claim.buktiTransferSebelumnya)
+                      ? renderProofViewer(
+                          'Bukti Transfer Pengembalian Dana (Dari Finance)',
+                          claim.buktiTransferPengembalian,
+                          claim.ticketNumber,
+                        )
+                      : renderProofViewer(
+                          'Bukti Transfer Sebelumnya (Dari Siswa)',
+                          claim.buktiTransferSebelumnya,
+                          claim.ticketNumber,
+                        )
                   }
                 </div>
               </div>
@@ -2621,8 +3215,8 @@ function doPost(e) {
                       <div class="flex flex-col gap-3 rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-4 sm:flex-row sm:items-center sm:justify-between">
                         <div class="flex items-center gap-3 min-w-0">
                           ${
-                            savedAttachment.mimeType.startsWith('image/')
-                              ? `<img src="${escapeHtml(resolveProofPreviewUrl(savedAttachment))}" alt="Lampiran ${escapeHtml(savedAttachment.name)}" referrerpolicy="no-referrer" class="h-14 w-14 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
+                            savedAttachment.mimeType.startsWith('image/') && resolveProofPreviewUrl(savedAttachment)
+                              ? `<img data-proof-thumb data-candidates="${escapeHtml(JSON.stringify(getDriveCandidateUrls(savedAttachment.dataUrl || savedAttachment.remoteUrl, savedAttachment.mimeType)))}" data-candidate-idx="0" src="${escapeHtml(resolveProofPreviewUrl(savedAttachment))}" alt="Lampiran ${escapeHtml(savedAttachment.name)}" referrerpolicy="no-referrer" class="h-14 w-14 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
                               : `<div class="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-6 w-6')}</div>`
                           }
                           <div class="min-w-0">
@@ -2757,8 +3351,8 @@ function doPost(e) {
                         <div class="mt-1.5 flex items-center justify-between gap-4 rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-3">
                           <div class="flex items-center gap-3 min-w-0">
                             ${
-                              rm.refundProof.mimeType.startsWith('image/')
-                                ? `<img src="${escapeHtml(resolveProofPreviewUrl(rm.refundProof))}" alt="Bukti pengembalian ${escapeHtml(rm.refundProof.name)}" referrerpolicy="no-referrer" class="h-11 w-11 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
+                              rm.refundProof.mimeType.startsWith('image/') && resolveProofPreviewUrl(rm.refundProof)
+                                ? `<img data-proof-thumb data-candidates="${escapeHtml(JSON.stringify(getDriveCandidateUrls(rm.refundProof.dataUrl || rm.refundProof.remoteUrl, rm.refundProof.mimeType)))}" data-candidate-idx="0" src="${escapeHtml(resolveProofPreviewUrl(rm.refundProof))}" alt="Bukti pengembalian ${escapeHtml(rm.refundProof.name)}" referrerpolicy="no-referrer" class="h-11 w-11 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
                                 : `<div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-5 w-5')}</div>`
                             }
                             <div class="min-w-0">
@@ -3546,7 +4140,7 @@ function doPost(e) {
             bindAdminTableRowEvents();
           }
 
-          // Proof Preview Modal events
+          // Proof Preview Modal events & Google Drive multi-layer fallbacks
           if (state.previewClaim) {
             const closePrev = document.getElementById('btn-close-preview');
             if (closePrev) {
@@ -3561,7 +4155,131 @@ function doPost(e) {
                 render();
               });
             });
+            document.querySelectorAll('button[data-action="open-gas-from-preview"]').forEach((btn) => {
+              btn.addEventListener('click', () => {
+                state.previewClaim = null;
+                state.showGasSetup = true;
+                render();
+              });
+            });
+
+            // Jika baris dari Sheet lama hanya memiliki nama file tanpa URL, coba resolve otomatis via Apps Script (bila sudah diperbarui)
+            document.querySelectorAll('[data-proof-missing-url]').forEach((box) => {
+              const ticketId = box.getAttribute('data-ticket') || '';
+              const fileName = box.getAttribute('data-file-name') || '';
+              if (!isGasConfigured() || (!ticketId && !fileName)) return;
+              const statusEl = box.querySelector('[data-proof-lookup-status]');
+              if (statusEl) {
+                statusEl.textContent = 'Mencari tautan file di Google Drive...';
+              }
+              void fetchGasProofProxy({ fileName, ticketId }).then((res) => {
+                if (!res || (!res.dataUrl && !res.fileUrl)) {
+                  if (statusEl) {
+                    statusEl.textContent =
+                      'Data dari Google Sheet hanya mencantumkan nama file tanpa tautan Google Drive langsung. Klik tombol di bawah untuk mencari file di Google Drive atau perbarui skrip Apps Script agar pratinjau termuat otomatis.';
+                  }
+                  return;
+                }
+                if (state.previewClaim && state.previewClaim.ticketNumber === ticketId) {
+                  const targetKey =
+                    state.previewTab === 'refund' && state.previewClaim.buktiTransferPengembalian
+                      ? 'buktiTransferPengembalian'
+                      : 'buktiTransferSebelumnya';
+                  const currentProof = state.previewClaim[targetKey] || { name: fileName || 'bukti-transfer' };
+                  const patched = {
+                    ...currentProof,
+                    name: res.fileName || currentProof.name,
+                    mimeType: res.mimeType || currentProof.mimeType || 'image/png',
+                    dataUrl: res.dataUrl || res.fileUrl || '',
+                    remoteUrl: res.fileUrl || currentProof.remoteUrl || '',
+                    driveFileId: res.fileId || currentProof.driveFileId || '',
+                  };
+                  state.previewClaim = { ...state.previewClaim, [targetKey]: patched };
+                  state.claims = state.claims.map((c) =>
+                    c.ticketNumber === ticketId ? { ...c, [targetKey]: patched } : c,
+                  );
+                  render();
+                }
+              });
+            });
+
+            // Fallback berlapis untuk gambar Google Drive: lh3 -> thumbnail -> uc -> GAS proxy -> iframe Drive /preview
+            document.querySelectorAll('img[data-proof-img]').forEach((img) => {
+              const stage = img.closest('[data-proof-stage]');
+              const iframeBox = stage ? stage.querySelector('[data-proof-iframe-box]') : null;
+              const iframe = stage ? stage.querySelector('iframe[data-proof-iframe]') : null;
+              const errorBox = stage ? stage.querySelector('[data-proof-error-box]') : null;
+              const driveId = stage ? stage.getAttribute('data-drive-id') || '' : '';
+              const fileName = stage ? stage.getAttribute('data-file-name') || '' : '';
+              const ticketId = stage ? stage.getAttribute('data-ticket') || '' : '';
+
+              const showIframeOrError = () => {
+                img.classList.add('hidden');
+                const iframeSrc = iframe ? iframe.getAttribute('data-src') : '';
+                if (iframeBox && iframe && iframeSrc) {
+                  if (!iframe.getAttribute('src')) {
+                    iframe.setAttribute('src', iframeSrc);
+                  }
+                  iframeBox.classList.remove('hidden');
+                } else if (errorBox) {
+                  errorBox.classList.remove('hidden');
+                  errorBox.classList.add('flex');
+                }
+              };
+
+              img.addEventListener('error', async () => {
+                let candidates = [];
+                try {
+                  candidates = JSON.parse(img.getAttribute('data-candidates') || '[]');
+                } catch {
+                  candidates = [];
+                }
+                const currentIdx = Number(img.getAttribute('data-candidate-idx') || '0');
+                const nextIdx = currentIdx + 1;
+                if (nextIdx < candidates.length) {
+                  img.setAttribute('data-candidate-idx', String(nextIdx));
+                  img.src = candidates[nextIdx];
+                  return;
+                }
+
+                if (!img.dataset.proxyTried && isGasConfigured() && (driveId || fileName || ticketId)) {
+                  img.dataset.proxyTried = '1';
+                  const proxyRes = await fetchGasProofProxy({ id: driveId, fileName, ticketId });
+                  if (proxyRes && proxyRes.dataUrl) {
+                    img.src = proxyRes.dataUrl;
+                    if (state.previewClaim && state.previewClaim.ticketNumber === ticketId) {
+                      const targetKey =
+                        state.previewTab === 'refund' && state.previewClaim.buktiTransferPengembalian
+                          ? 'buktiTransferPengembalian'
+                          : 'buktiTransferSebelumnya';
+                      if (state.previewClaim[targetKey]) {
+                        state.previewClaim[targetKey].dataUrl = proxyRes.dataUrl;
+                      }
+                    }
+                    return;
+                  }
+                }
+
+                showIframeOrError();
+              });
+            });
           }
+
+          document.querySelectorAll('img[data-proof-thumb]').forEach((img) => {
+            img.addEventListener('error', () => {
+              let candidates = [];
+              try {
+                candidates = JSON.parse(img.getAttribute('data-candidates') || '[]');
+              } catch {
+                candidates = [];
+              }
+              const nextIdx = Number(img.getAttribute('data-candidate-idx') || '0') + 1;
+              if (nextIdx < candidates.length) {
+                img.setAttribute('data-candidate-idx', String(nextIdx));
+                img.src = candidates[nextIdx];
+              }
+            });
+          });
 
           // Refund Modal events
           const rm = state.refundModal;

@@ -137,6 +137,48 @@
           { value: 'Ditolak', label: 'Ditolak' },
         ];
 
+        const HANDLER_CATEGORY_OPTIONS = ['CS', 'Cabang'];
+
+        const CS_HANDLER_OPTIONS = [
+          'Ara (Retha)',
+          'Celine (Anisa CS)',
+          'Celsy (Lila)',
+          'Fita (Dewi)',
+          'Gea (Putri)',
+          'Hana (Ismi)',
+          'Kenzie (Tiara)',
+          'Kia (Eko)',
+          'Lucy (Jeje)',
+          'Max (Ajay)',
+          'Nada (Rossy)',
+          'Oliv (Rafida)',
+          'Ryas (Afida)',
+          'Tia (Ana)',
+          'Vyn (Aldi)',
+          'Yuki (Fia)',
+          'Zea (Vina)',
+        ];
+
+        const CABANG_HANDLER_OPTIONS = ['Admin', 'CS'];
+
+        function getHandlerSubOptions(category) {
+          if (category === 'CS') return CS_HANDLER_OPTIONS;
+          if (category === 'Cabang') return CABANG_HANDLER_OPTIONS;
+          return [];
+        }
+
+        function formatPengajuSummary(claim) {
+          if (!claim) return '';
+          const parts = [];
+          const kategori = String(claim.kategoriPengaju || '').trim();
+          const sub = String(claim.subPengaju || '').trim();
+          const nama = String(claim.namaPengaju || '').trim();
+          if (kategori) parts.push(kategori);
+          if (sub) parts.push(sub);
+          if (nama && kategori !== 'CS') parts.push(nama);
+          return parts.filter(Boolean).join(' ');
+        }
+
         const STATUS_SELECT_STYLES = {
           'Menunggu Verifikasi': 'border-amber-300 bg-amber-50 text-amber-900',
           'Verifikasi Admin': 'border-sky-300 bg-sky-50 text-sky-900',
@@ -198,7 +240,7 @@ function getOrCreateSheet_() {
       'ticketId', 'Tanggal Pengajuan', 'Diperbarui',
       'namaSiswa', 'noRegistrasi', 'noPonsel', 'cabang', 'program',
       'periode', 'namaBank', 'noRekening', 'namaPemilik',
-      'nominal', 'alasan', 'status',
+      'nominal', 'alasan', 'kategoriPengaju', 'subPengaju', 'namaPengaju', 'status',
       'fileUrl', 'fileName', 'mimeType',
       'refundUrl', 'refundFileName', 'refundMimeType',
       'catatanPengembalian', 'waktuNotifikasi'
@@ -410,6 +452,9 @@ function doGet(e) {
     namaPemilik: findCol_(headers, ['namarekening', 'namapemilik', 'namapemilikrekening', 'atasnama']),
     nominal: findCol_(headers, ['nominal', 'nominalklaim', 'jumlah']),
     alasan: findCol_(headers, ['alasan', 'alasanklaim', 'keterangan']),
+    kategoriPengaju: findCol_(headers, ['kategoripengaju', 'sumberpengaju', 'pengajukategori']),
+    subPengaju: findCol_(headers, ['subpengaju', 'namacs', 'bagiancabang', 'detailpengaju']),
+    namaPengaju: findCol_(headers, ['namapengaju', 'namapic', 'petugaspengaju', 'namapengisi']),
     status: findCol_(headers, ['status', 'statusklaim', 'persetujuanstatus']),
     fileUrl: findCol_(headers, ['fileurl', 'buktipembayaransebelumnya', 'buktitransfersebelumnya', 'buktitransfer', 'buktipembayaran', 'buktiurl', 'proofurl', 'bukti']),
     fileName: findCol_(headers, ['filename', 'namafile']),
@@ -468,6 +513,9 @@ function doGet(e) {
       namaPemilik: col.namaPemilik !== -1 ? r[col.namaPemilik] : '',
       nominal: Number(col.nominal !== -1 ? r[col.nominal] : 0) || 0,
       alasan: col.alasan !== -1 ? r[col.alasan] : '',
+      kategoriPengaju: col.kategoriPengaju !== -1 ? String(r[col.kategoriPengaju] || '') : '',
+      subPengaju: col.subPengaju !== -1 ? String(r[col.subPengaju] || '') : '',
+      namaPengaju: col.namaPengaju !== -1 ? String(r[col.namaPengaju] || '') : '',
       status: (col.status !== -1 && r[col.status]) ? String(r[col.status]) : 'Menunggu Verifikasi',
       fileUrl: proofUrl,
       driveFileId: extractDriveIdFromUrl_(proofUrl),
@@ -481,7 +529,12 @@ function doGet(e) {
     });
   }
   return ContentService
-    .createTextOutput(JSON.stringify({ ok: true, status: 'success', data: data.reverse() }))
+    .createTextOutput(JSON.stringify({
+      ok: true,
+      status: 'success',
+      capabilities: { deleteClaim: true, proxyImage: true },
+      data: data.reverse()
+    }))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -505,6 +558,35 @@ function doPost(e) {
         if (statusCol !== -1) sheet.getRange(rowNum, statusCol + 1).setValue(payload.newStatus);
         return ContentService
           .createTextOutput(JSON.stringify({ ok: true, status: 'success' }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: 'Tiket tidak ditemukan.' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  if (payload.action === 'deleteClaim') {
+    const richTexts = range.getRichTextValues();
+    const formulas = range.getFormulas();
+    const fileCol = findCol_(headers, ['fileurl', 'buktipembayaransebelumnya', 'buktitransfersebelumnya', 'buktitransfer', 'buktipembayaran', 'buktiurl', 'proofurl', 'bukti']);
+    const refundCol = findCol_(headers, ['refundurl', 'refundproofurl', 'buktipengembalian']);
+    for (let i = rows.length - 1; i >= 1; i--) {
+      const rowTicket = String(rows[i][ticketCol !== -1 ? ticketCol : 0] || '');
+      if (rowTicket === String(payload.ticketId)) {
+        const trashIfDrive = function(colIdx) {
+          if (colIdx === -1) return;
+          const url = extractCellUrl_(rows[i][colIdx], richTexts[i][colIdx], formulas[i][colIdx]);
+          const fid = extractDriveIdFromUrl_(url);
+          if (fid) {
+            try { DriveApp.getFileById(fid).setTrashed(true); } catch (err) {}
+          }
+        };
+        trashIfDrive(fileCol);
+        trashIfDrive(refundCol);
+        sheet.deleteRow(i + 1);
+        return ContentService
+          .createTextOutput(JSON.stringify({ ok: true, status: 'success', deleted: true, ticketId: payload.ticketId }))
           .setMimeType(ContentService.MimeType.JSON);
       }
     }
@@ -561,6 +643,17 @@ function doPost(e) {
     }
 
     const saved = saveBase64ToDrive_(payload.fileData, payload.fileName, payload.mimeType, finalTicketId + '_awal');
+    const ensureCol = function(aliases, headerName) {
+      if (findCol_(headers, aliases) === -1) {
+        sheet.getRange(1, headers.length + 1).setValue(headerName);
+        headers.push(headerName);
+      }
+    };
+    if (payload.kategoriPengaju || payload.subPengaju || payload.namaPengaju) {
+      ensureCol(['kategoripengaju', 'sumberpengaju', 'pengajukategori'], 'kategoriPengaju');
+      ensureCol(['subpengaju', 'namacs', 'bagiancabang', 'detailpengaju'], 'subPengaju');
+      ensureCol(['namapengaju', 'namapic', 'petugaspengaju', 'namapengisi'], 'namaPengaju');
+    }
     const newRow = new Array(headers.length).fill('');
     const setByAliases = function(aliases, value) {
       const idx = findCol_(headers, aliases);
@@ -587,6 +680,9 @@ function doPost(e) {
     setByAliases(['namarekening', 'namapemilik', 'namapemilikrekening', 'atasnama'], payload.namaPemilik || '');
     setByAliases(['nominal', 'nominalklaim', 'jumlah'], payload.nominal || 0);
     setByAliases(['alasan', 'alasanklaim', 'keterangan'], payload.alasan || '');
+    setByAliases(['kategoripengaju', 'sumberpengaju', 'pengajukategori'], payload.kategoriPengaju || '');
+    setByAliases(['subpengaju', 'namacs', 'bagiancabang', 'detailpengaju'], payload.subPengaju || '');
+    setByAliases(['namapengaju', 'namapic', 'petugaspengaju', 'namapengisi'], payload.namaPengaju || '');
     setByAliases(['status', 'statusklaim', 'persetujuanstatus'], payload.status || 'Menunggu Verifikasi');
     // Simpan URL Google Drive asli (bukan sekadar nama file) agar pratinjau admin selalu dapat memuat gambar
     setByAliases(['fileurl', 'buktipembayaransebelumnya', 'buktitransfersebelumnya', 'buktitransfer', 'buktipembayaran', 'buktiurl', 'proofurl', 'bukti'], saved.viewUrl);
@@ -836,6 +932,25 @@ function doPost(e) {
             errors.alasanKlaim = 'Jelaskan alasan pengajuan klaim minimal 10 karakter.';
           }
 
+          const kategoriPengaju = String(input.kategoriPengaju || '').trim();
+          const subPengaju = String(input.subPengaju || '').trim();
+          const namaPengaju = String(input.namaPengaju || '').trim();
+
+          if (!HANDLER_CATEGORY_OPTIONS.includes(kategoriPengaju)) {
+            errors.kategoriPengaju = 'Pilih CS atau Cabang terlebih dahulu.';
+          } else {
+            const validSubOptions = getHandlerSubOptions(kategoriPengaju);
+            if (!validSubOptions.includes(subPengaju)) {
+              errors.subPengaju =
+                kategoriPengaju === 'CS'
+                  ? 'Pilih nama CS terlebih dahulu.'
+                  : 'Pilih Admin atau CS pada cabang terlebih dahulu.';
+            }
+            if (kategoriPengaju === 'Cabang' && !namaPengaju) {
+              errors.namaPengaju = 'Nama pengisi wajib diisi (Contoh: Indra).';
+            }
+          }
+
           return errors;
         }
 
@@ -892,6 +1007,9 @@ function doPost(e) {
               item.namaBank,
               item.nomorRekening,
               item.namaPemilikRekening,
+              item.kategoriPengaju || '',
+              item.subPengaju || '',
+              item.namaPengaju || '',
               item.status,
             ]
               .join(' ')
@@ -924,6 +1042,9 @@ function doPost(e) {
             'Nama Pemilik Rekening',
             'Nominal Klaim (IDR)',
             'Alasan Pengajuan',
+            'Sumber Pengajuan (CS/Cabang)',
+            'Nama CS / Bagian Cabang',
+            'Nama Pengisi',
             'Status',
             'Nama File Bukti Sebelumnya',
             'Nama File Bukti Pengembalian',
@@ -944,6 +1065,9 @@ function doPost(e) {
             c.namaPemilikRekening,
             c.nominalKlaim,
             c.alasanKlaim,
+            c.kategoriPengaju || '',
+            c.subPengaju || '',
+            c.namaPengaju || '',
             c.status,
             c.buktiTransferSebelumnya ? c.buktiTransferSebelumnya.name : '',
             c.buktiTransferPengembalian ? c.buktiTransferPengembalian.name : '',
@@ -1345,6 +1469,9 @@ function doPost(e) {
             ),
             nominalKlaim: safeNominal,
             alasanKlaim: String(pick('alasan', 'alasanKlaim', 'keterangan') ?? ''),
+            kategoriPengaju: String(pick('kategoriPengaju', 'sumberPengaju', 'pengajuKategori') ?? ''),
+            subPengaju: String(pick('subPengaju', 'namaCs', 'bagianCabang', 'detailPengaju') ?? ''),
+            namaPengaju: String(pick('namaPengaju', 'namaPic', 'petugaspengaju', 'namaPengisi') ?? ''),
             buktiTransferSebelumnya: initialProof,
             buktiTransferPengembalian: refundProof,
             status: resolvedStatus,
@@ -1478,13 +1605,21 @@ function doPost(e) {
             );
           }
 
-          const normalized = rawList.map(normalizeClaimRecord);
-          const rejectedTickets = new Set(
-            normalized
-              .filter((item) => item.status === 'Ditolak' && item.ticketNumber)
-              .map((item) => item.ticketNumber),
+          state.gasSupportsDelete = Boolean(
+            res && res.capabilities && res.capabilities.deleteClaim,
           );
 
+          const localMetaMap = getLocalPengajuMetaMap();
+          const normalized = rawList.map((raw) => {
+            const item = normalizeClaimRecord(raw);
+            if (!item.kategoriPengaju && item.ticketNumber && localMetaMap[item.ticketNumber]) {
+              const savedMeta = localMetaMap[item.ticketNumber];
+              item.kategoriPengaju = savedMeta.kategoriPengaju || '';
+              item.subPengaju = savedMeta.subPengaju || '';
+              item.namaPengaju = savedMeta.namaPengaju || '';
+            }
+            return item;
+          });
           const seenTickets = new Set();
           return normalized.filter((item) => {
             const isEmptyGhostRow =
@@ -1492,14 +1627,70 @@ function doPost(e) {
               !String(item.nomorRegistrasi || '').trim() &&
               (!Number.isFinite(item.nominalKlaim) || item.nominalKlaim <= 0);
             if (isEmptyGhostRow) return false;
-            if (item.status === 'Ditolak') return false;
-            if (item.ticketNumber && rejectedTickets.has(item.ticketNumber)) return false;
+            if (isClaimHiddenLocally(item.ticketNumber)) return false;
             if (item.ticketNumber) {
               if (seenTickets.has(item.ticketNumber)) return false;
               seenTickets.add(item.ticketNumber);
             }
             return true;
           });
+        }
+
+        const ARCHIVED_TEST_TICKETS = new Set(['KLM-20261126-0301']);
+        const DELETED_TICKETS_STORAGE_KEY = 'klaim_deleted_tickets_v1';
+        const PENGAJU_META_STORAGE_KEY = 'klaim_pengaju_meta_v1';
+
+        function getLocalPengajuMetaMap() {
+          try {
+            const raw = localStorage.getItem(PENGAJU_META_STORAGE_KEY);
+            const parsed = raw ? JSON.parse(raw) : {};
+            return parsed && typeof parsed === 'object' ? parsed : {};
+          } catch {
+            return {};
+          }
+        }
+
+        function saveLocalPengajuMeta(ticketNumber, meta) {
+          const t = String(ticketNumber || '').trim();
+          if (!t || !meta || !meta.kategoriPengaju) return;
+          try {
+            const map = getLocalPengajuMetaMap();
+            map[t] = {
+              kategoriPengaju: String(meta.kategoriPengaju || '').trim(),
+              subPengaju: String(meta.subPengaju || '').trim(),
+              namaPengaju: String(meta.namaPengaju || '').trim(),
+            };
+            localStorage.setItem(PENGAJU_META_STORAGE_KEY, JSON.stringify(map));
+          } catch {
+            // Abaikan
+          }
+        }
+
+        function getLocalDeletedTickets() {
+          try {
+            const raw = localStorage.getItem(DELETED_TICKETS_STORAGE_KEY);
+            const arr = raw ? JSON.parse(raw) : [];
+            return new Set(Array.isArray(arr) ? arr.map(String) : []);
+          } catch {
+            return new Set();
+          }
+        }
+
+        function saveLocalDeletedTicket(ticketNumber) {
+          if (!ticketNumber) return;
+          try {
+            const set = getLocalDeletedTickets();
+            set.add(String(ticketNumber));
+            localStorage.setItem(DELETED_TICKETS_STORAGE_KEY, JSON.stringify([...set]));
+          } catch {
+            // Abaikan
+          }
+        }
+
+        function isClaimHiddenLocally(ticketNumber) {
+          const t = String(ticketNumber || '').trim();
+          if (!t) return false;
+          return ARCHIVED_TEST_TICKETS.has(t) || getLocalDeletedTickets().has(t);
         }
 
         async function fetchAllRawClaimsForSequence() {
@@ -1567,6 +1758,12 @@ function doPost(e) {
             namaPemilikRekening: input.namaPemilikRekening.trim().toUpperCase(),
             nominalKlaim: input.nominalKlaim,
             alasanKlaim: input.alasanKlaim.trim(),
+            kategoriPengaju: String(input.kategoriPengaju || '').trim(),
+            subPengaju: String(input.subPengaju || '').trim(),
+            namaPengaju:
+              String(input.kategoriPengaju || '').trim() === 'Cabang'
+                ? String(input.namaPengaju || '').trim()
+                : '',
             buktiTransferSebelumnya: input.buktiTransferSebelumnya,
             status: 'Menunggu Verifikasi',
           };
@@ -1586,17 +1783,23 @@ function doPost(e) {
             namaPemilik: record.namaPemilikRekening,
             nominal: record.nominalKlaim,
             alasan: record.alasanKlaim,
+            kategoriPengaju: record.kategoriPengaju,
+            subPengaju: record.subPengaju,
+            namaPengaju: record.namaPengaju,
             fileData: base64Data,
             fileName: input.buktiTransferSebelumnya.name,
             mimeType: input.buktiTransferSebelumnya.mimeType || 'application/octet-stream',
           });
 
           if (result && result.claim) {
-            return normalizeClaimRecord(result.claim);
+            const normalizedClaim = normalizeClaimRecord(result.claim);
+            saveLocalPengajuMeta(normalizedClaim.ticketNumber, record);
+            return normalizedClaim;
           }
           if (result && result.ticketId) {
             record.ticketNumber = String(result.ticketId);
           }
+          saveLocalPengajuMeta(record.ticketNumber, record);
           const remoteUrl = (result && (result.proofUrl || result.fileUrl)) || '';
           if (remoteUrl) {
             record.buktiTransferSebelumnya = {
@@ -1801,6 +2004,9 @@ function doPost(e) {
             nominalDisplay: '',
             buktiFile: null,
             alasanKlaim: '',
+            kategoriPengaju: '',
+            subPengaju: '',
+            namaPengaju: '',
             errors: {},
             submitError: null,
             isSubmitting: false,
@@ -1819,7 +2025,11 @@ function doPost(e) {
           isLoading: false,
           loadError: null,
           actionError: null,
+          actionNotice: null,
           updatingTicket: null,
+          deletingTicket: null,
+          deleteConfirmClaim: null,
+          gasSupportsDelete: false,
           searchQuery: '',
           statusFilter: 'Semua',
           branchFilter: 'Semua',
@@ -2249,6 +2459,72 @@ function doPost(e) {
                       >${escapeHtml(f.alasanKlaim)}</textarea>
                       <p id="err-alasanKlaim" class="mt-1.5 text-xs text-red-700 ${e.alasanKlaim ? '' : 'hidden'}">${escapeHtml(e.alasanKlaim || '')}</p>
                     </div>
+
+                    <div class="space-y-4 pt-1">
+                      <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 sm:items-start">
+                        <div>
+                          <label for="field-kategoriPengaju" class="block text-sm font-semibold text-[#3D0C0C]">
+                            Sumber Pengajuan (CS / Cabang) <span class="text-[#8E1616]">*</span>
+                          </label>
+                          <select
+                            id="field-kategoriPengaju"
+                            aria-invalid="${Boolean(e.kategoriPengaju)}"
+                            class="${fieldInputClass(Boolean(e.kategoriPengaju))}"
+                          >
+                            <option value="">Pilih CS atau Cabang...</option>
+                            ${HANDLER_CATEGORY_OPTIONS.map(
+                              (opt) => `<option value="${escapeHtml(opt)}" ${f.kategoriPengaju === opt ? 'selected' : ''}>${escapeHtml(opt)}</option>`,
+                            ).join('')}
+                          </select>
+                          <p id="err-kategoriPengaju" class="mt-1.5 text-xs text-red-700 ${e.kategoriPengaju ? '' : 'hidden'}">${escapeHtml(e.kategoriPengaju || '')}</p>
+                        </div>
+
+                        ${
+                          f.kategoriPengaju
+                            ? `
+                              <div>
+                                <label for="field-subPengaju" class="block text-sm font-semibold text-[#3D0C0C]">
+                                  ${f.kategoriPengaju === 'CS' ? 'Nama CS' : 'Bagian Cabang'} <span class="text-[#8E1616]">*</span>
+                                </label>
+                                <select
+                                  id="field-subPengaju"
+                                  aria-invalid="${Boolean(e.subPengaju)}"
+                                  class="${fieldInputClass(Boolean(e.subPengaju))}"
+                                >
+                                  <option value="">${f.kategoriPengaju === 'CS' ? 'Pilih nama CS...' : 'Pilih Admin atau CS...'}</option>
+                                  ${getHandlerSubOptions(f.kategoriPengaju).map(
+                                    (opt) => `<option value="${escapeHtml(opt)}" ${f.subPengaju === opt ? 'selected' : ''}>${escapeHtml(opt)}</option>`,
+                                  ).join('')}
+                                </select>
+                                <p id="err-subPengaju" class="mt-1.5 text-xs text-red-700 ${e.subPengaju ? '' : 'hidden'}">${escapeHtml(e.subPengaju || '')}</p>
+                              </div>
+                            `
+                            : ''
+                        }
+                      </div>
+
+                      ${
+                        f.kategoriPengaju === 'Cabang'
+                          ? `
+                            <div>
+                              <label for="field-namaPengaju" class="block text-sm font-semibold text-[#3D0C0C]">
+                                Nama Pengisi / Petugas <span class="text-[#8E1616]">*</span>
+                              </label>
+                              <input
+                                id="field-namaPengaju"
+                                type="text"
+                                required
+                                value="${escapeHtml(f.namaPengaju)}"
+                                placeholder="Contoh: Indra"
+                                aria-invalid="${Boolean(e.namaPengaju)}"
+                                class="${fieldInputClass(Boolean(e.namaPengaju), 'placeholder:text-[#A37A7A]')}"
+                              />
+                              <p id="err-namaPengaju" class="mt-1.5 text-xs text-red-700 ${e.namaPengaju ? '' : 'hidden'}">${escapeHtml(e.namaPengaju || '')}</p>
+                            </div>
+                          `
+                          : ''
+                      }
+                    </div>
                   </section>
 
                   ${
@@ -2432,6 +2708,16 @@ function doPost(e) {
                     <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Alasan Pengajuan</dt>
                     <dd class="mt-1 leading-relaxed text-[#7E5454]">${escapeHtml(claim.alasanKlaim)}</dd>
                   </div>
+                  ${
+                    formatPengajuSummary(claim)
+                      ? `
+                        <div class="sm:col-span-2">
+                          <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Sumber &amp; Petugas Pengaju</dt>
+                          <dd class="mt-1 font-medium text-[#3D0C0C]">${escapeHtml(formatPengajuSummary(claim))}</dd>
+                        </div>
+                      `
+                      : ''
+                  }
                 </dl>
 
                 <div class="no-print mt-8 flex flex-col gap-3 border-t border-[#8E1616]/10 pt-6 sm:flex-row sm:items-center sm:justify-between">
@@ -2585,37 +2871,42 @@ function doPost(e) {
               const isLockedTransferred = claim.status === 'Selesai / Ditransfer';
               return `
                 <tr class="hover:bg-[#FEF9F9]/80 transition-colors">
-                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                  <td class="pl-4 pr-2 py-4 align-top whitespace-nowrap">
                     <div class="font-mono text-xs font-semibold text-[#3D0C0C] tabular-nums">
                       ${escapeHtml(claim.ticketNumber)}
                     </div>
-                    <div class="mt-0.5 text-xs text-[#8C5E5E] tabular-nums">
+                    <div class="mt-0.5 text-[11px] text-[#8C5E5E] tabular-nums">
                       ${escapeHtml(formatIndonesianDateTime(claim.createdAt))}
                     </div>
                   </td>
 
-                  <td class="px-2.5 py-4 align-top">
+                  <td class="px-2 py-4 align-top">
                     <div class="font-semibold text-[#3D0C0C]">${escapeHtml(claim.namaSiswa)}</div>
-                    <div class="mt-0.5 font-mono text-xs text-[#7E5454] tabular-nums">
+                    <div class="mt-0.5 font-mono text-[11px] text-[#7E5454] tabular-nums">
                       Reg ${escapeHtml(claim.nomorRegistrasi)} · ${escapeHtml(claim.nomorPonsel)}
                     </div>
                   </td>
 
-                  <td class="px-2.5 py-4 align-top">
+                  <td class="px-2 py-4 align-top">
                     <div class="font-medium text-[#3D0C0C]">${escapeHtml(claim.cabang)}</div>
-                    <div class="mt-0.5 text-xs text-[#7E5454] max-w-[160px] truncate" title="${escapeHtml(claim.programKursus)}">
+                    <div class="mt-0.5 text-xs text-[#7E5454] max-w-[140px] truncate" title="${escapeHtml(claim.programKursus)}">
                       ${escapeHtml(claim.programKursus)}
                     </div>
+                    ${
+                      formatPengajuSummary(claim)
+                        ? `<div class="mt-1 text-[11px] font-medium leading-snug text-[#8E1616]/90 max-w-[148px] break-words">${escapeHtml(formatPengajuSummary(claim))}</div>`
+                        : ''
+                    }
                   </td>
 
-                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                  <td class="px-2 py-4 align-top whitespace-nowrap">
                     <span class="font-mono text-xs font-medium text-[#3D0C0C] tabular-nums">
                       ${escapeHtml((claim.periode || '').trim() || '-')}
                     </span>
                   </td>
 
-                  <td class="px-2.5 py-4 align-top">
-                    <div class="font-medium text-[#3D0C0C]">
+                  <td class="px-2 py-4 align-top">
+                    <div class="font-medium text-[#3D0C0C] text-[13px]">
                       ${escapeHtml(claim.namaBank)} ·
                       <span class="font-mono text-xs tabular-nums">${escapeHtml(claim.nomorRekening)}</span>
                     </div>
@@ -2624,33 +2915,33 @@ function doPost(e) {
                     </div>
                   </td>
 
-                  <td class="px-2.5 py-4 align-top text-right whitespace-nowrap">
+                  <td class="px-2 py-4 align-top text-right whitespace-nowrap">
                     <span class="font-mono font-bold text-[#8E1616] tabular-nums">
                       ${escapeHtml(formatRupiah(claim.nominalKlaim))}
                     </span>
                   </td>
 
-                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                  <td class="px-2 py-4 align-top whitespace-nowrap">
                     <button
                       type="button"
                       data-action="preview"
                       data-ticket="${escapeHtml(claim.ticketNumber)}"
                       aria-label="Pratinjau bukti ${escapeHtml(claim.ticketNumber)}"
-                      class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer"
+                      class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-2.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer"
                     >
                       ${icon('eye', 'h-3.5 w-3.5 text-[#8E1616]')}
                       Pratinjau
                     </button>
                   </td>
 
-                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
+                  <td class="px-2 py-4 align-top whitespace-nowrap">
                     <select
                       data-action="status-change"
                       data-ticket="${escapeHtml(claim.ticketNumber)}"
                       aria-label="Status persetujuan ${escapeHtml(claim.ticketNumber)}"
                       ${isUpdating || isLockedTransferred ? 'disabled' : ''}
                       ${isLockedTransferred ? 'aria-disabled="true" title="Status sudah Selesai / Ditransfer dan dikunci"' : ''}
-                      class="w-36 rounded-lg border px-2 py-1.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#8E1616]/20 ${isLockedTransferred ? 'cursor-not-allowed disabled:opacity-100' : 'cursor-pointer'} ${statusStyle}"
+                      class="w-[130px] rounded-lg border px-2 py-1.5 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-[#8E1616]/20 ${isLockedTransferred ? 'cursor-not-allowed disabled:opacity-100' : 'cursor-pointer'} ${statusStyle}"
                     >
                       ${CLAIM_STATUS_OPTIONS.map(
                         (opt) =>
@@ -2659,21 +2950,33 @@ function doPost(e) {
                     </select>
                   </td>
 
-                  <td class="px-2.5 py-4 align-top whitespace-nowrap">
-                    <button
-                      type="button"
-                      data-action="refund"
-                      data-ticket="${escapeHtml(claim.ticketNumber)}"
-                      aria-label="Upload bukti transfer dan kirim ke ${escapeHtml(claim.namaSiswa)}"
-                      class="inline-flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
-                        claim.buktiTransferPengembalian
-                          ? 'border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
-                          : 'bg-[#8E1616] text-white hover:bg-[#731111]'
-                      }"
-                    >
-                      ${icon('send', 'h-3.5 w-3.5')}
-                      ${claim.buktiTransferPengembalian ? 'Terkirim / Ubah' : 'Upload & Kirim'}
-                    </button>
+                  <td class="pl-2 pr-4 py-4 align-top whitespace-nowrap">
+                    <div class="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        data-action="refund"
+                        data-ticket="${escapeHtml(claim.ticketNumber)}"
+                        aria-label="Upload bukti transfer dan kirim ke ${escapeHtml(claim.namaSiswa)}"
+                        class="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                          claim.buktiTransferPengembalian
+                            ? 'border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
+                            : 'bg-[#8E1616] text-white hover:bg-[#731111]'
+                        }"
+                      >
+                        ${icon('send', 'h-3.5 w-3.5')}
+                        ${claim.buktiTransferPengembalian ? 'Terkirim / Ubah' : 'Upload & Kirim'}
+                      </button>
+                      <button
+                        type="button"
+                        data-action="delete-claim"
+                        data-ticket="${escapeHtml(claim.ticketNumber)}"
+                        aria-label="Hapus data ${escapeHtml(claim.namaSiswa)} (${escapeHtml(claim.ticketNumber)})"
+                        title="Hapus pengajuan"
+                        class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-red-200 bg-white text-red-700 transition-colors hover:border-red-300 hover:bg-red-50 cursor-pointer"
+                      >
+                        ${icon('trash-2', 'h-3.5 w-3.5')}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               `;
@@ -2684,16 +2987,16 @@ function doPost(e) {
             <div class="overflow-x-auto">
               <table class="min-w-full text-left text-sm border-collapse">
                 <thead>
-                  <tr class="border-b border-[#8E1616]/10 font-mono text-[10px] uppercase tracking-[0.12em] text-[#8C5E5E]">
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Tiket &amp; Tanggal</th>
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Siswa</th>
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Cabang &amp; Program</th>
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Periode</th>
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Rekening Tujuan</th>
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold text-right whitespace-nowrap">Nominal Klaim</th>
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Bukti Transfer</th>
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Persetujuan Status</th>
-                    <th scope="col" class="px-2.5 py-3.5 font-semibold whitespace-nowrap">Transfer &amp; Ponsel</th>
+                  <tr class="border-b border-[#8E1616]/10 font-mono text-[10px] uppercase tracking-[0.08em] text-[#8C5E5E]">
+                    <th scope="col" class="pl-4 pr-2 py-3.5 font-semibold whitespace-nowrap">Tiket &amp; Tanggal</th>
+                    <th scope="col" class="px-2 py-3.5 font-semibold whitespace-nowrap">Siswa</th>
+                    <th scope="col" class="px-2 py-3.5 font-semibold whitespace-nowrap">Cabang &amp; Program</th>
+                    <th scope="col" class="px-2 py-3.5 font-semibold whitespace-nowrap">Periode</th>
+                    <th scope="col" class="px-2 py-3.5 font-semibold whitespace-nowrap">Rekening Tujuan</th>
+                    <th scope="col" class="px-2 py-3.5 font-semibold text-right whitespace-nowrap">Nominal Klaim</th>
+                    <th scope="col" class="px-2 py-3.5 font-semibold whitespace-nowrap">Bukti Transfer</th>
+                    <th scope="col" class="px-2 py-3.5 font-semibold whitespace-nowrap">Persetujuan Status</th>
+                    <th scope="col" class="pl-2 pr-4 py-3.5 font-semibold whitespace-nowrap">Transfer &amp; Ponsel</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-[#8E1616]/5 bg-white">
@@ -2714,11 +3017,8 @@ function doPost(e) {
           );
           const statusTabs = [
             'Semua',
-            ...CLAIM_STATUS_OPTIONS.filter((s) => s.value !== 'Ditolak').map((s) => s.value),
+            ...CLAIM_STATUS_OPTIONS.map((s) => s.value),
           ];
-          if (state.statusFilter === 'Ditolak') {
-            state.statusFilter = 'Semua';
-          }
 
           return `
             <div class="mx-auto max-w-7xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8 space-y-8">
@@ -2819,6 +3119,22 @@ function doPost(e) {
                     <div role="alert" class="flex items-start gap-2.5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
                       ${icon('alert-circle', 'mt-0.5 h-4 w-4 shrink-0 text-red-600')}
                       <span>${escapeHtml(state.actionError)}</span>
+                    </div>
+                  `
+                  : ''
+              }
+
+              ${
+                state.actionNotice
+                  ? `
+                    <div role="status" class="flex items-center justify-between gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
+                      <div class="flex items-start gap-2.5">
+                        ${icon('check-circle-2', 'mt-0.5 h-4 w-4 shrink-0 text-emerald-700')}
+                        <span>${escapeHtml(state.actionNotice)}</span>
+                      </div>
+                      <button type="button" id="btn-dismiss-action-notice" aria-label="Tutup pemberitahuan" class="rounded-full p-1 text-emerald-700 hover:bg-emerald-100 cursor-pointer">
+                        ${icon('x', 'h-4 w-4')}
+                      </button>
                     </div>
                   `
                   : ''
@@ -3107,6 +3423,11 @@ function doPost(e) {
                     <div class="sm:col-span-3 border-t border-[#8E1616]/10 pt-3">
                       <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">Alasan Pengajuan Klaim</dt>
                       <dd class="mt-1 text-[#3D0C0C] leading-relaxed">${escapeHtml(claim.alasanKlaim)}</dd>
+                      ${
+                        formatPengajuSummary(claim)
+                          ? `<dd class="mt-1 text-xs font-medium text-[#3D0C0C]">Sumber &amp; Petugas: ${escapeHtml(formatPengajuSummary(claim))}</dd>`
+                          : ''
+                      }
                       <dd class="mt-1 text-xs text-[#8C5E5E] tabular-nums">
                         Diajukan: ${escapeHtml(formatIndonesianDateTime(claim.createdAt))} · Status: ${escapeHtml(claim.status)}
                       </dd>
@@ -3566,6 +3887,53 @@ function doPost(e) {
           `;
         }
 
+        function renderDeleteConfirmModal() {
+          const claim = state.deleteConfirmClaim;
+          if (!claim || state.mode !== 'admin') return '';
+          const isDeleting = state.deletingTicket === claim.ticketNumber;
+          return `
+            <div role="dialog" aria-modal="true" aria-labelledby="delete-modal-title" class="fixed inset-0 z-50 flex items-center justify-center bg-[#3D0C0C]/45 p-4 backdrop-blur-[2px]">
+              <div class="w-full max-w-md rounded-[20px] border border-[#8E1616]/15 bg-white shadow-xl">
+                <div class="flex items-center justify-between gap-4 border-b border-[#8E1616]/10 px-6 py-4">
+                  <div class="flex items-center gap-2.5">
+                    <div class="flex h-9 w-9 items-center justify-center rounded-full bg-red-50 text-red-700 border border-red-200">
+                      ${icon('trash-2', 'h-4 w-4')}
+                    </div>
+                    <h2 id="delete-modal-title" class="text-base font-extrabold tracking-tight text-[#3D0C0C]">
+                      Hapus Data Pengajuan
+                    </h2>
+                  </div>
+                  <button type="button" id="btn-close-delete-modal" aria-label="Tutup konfirmasi hapus" ${isDeleting ? 'disabled' : ''} class="rounded-full border border-[#8E1616]/15 p-2 text-[#8C5E5E] hover:bg-[#FFF0F0] hover:text-[#8E1616] cursor-pointer">
+                    ${icon('x', 'h-4 w-4')}
+                  </button>
+                </div>
+
+                <div class="space-y-4 p-6 text-sm text-[#3D0C0C]">
+                  <p class="leading-relaxed text-[#7E5454]">
+                    Apakah Anda yakin ingin menghapus data pengajuan klaim berikut dari dashboard?
+                  </p>
+                  <div class="rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-4 space-y-1">
+                    <p class="font-mono text-xs font-bold text-[#8E1616] tabular-nums">${escapeHtml(claim.ticketNumber)}</p>
+                    <p class="font-semibold text-[#3D0C0C]">${escapeHtml(claim.namaSiswa)}</p>
+                    <p class="text-xs text-[#7E5454] tabular-nums">
+                      ${escapeHtml(claim.cabang)} · ${escapeHtml(formatRupiah(claim.nominalKlaim))} · Status: ${escapeHtml(claim.status)}
+                    </p>
+                  </div>
+                  <div class="flex flex-col-reverse gap-2.5 pt-2 sm:flex-row sm:justify-end">
+                    <button type="button" id="btn-cancel-delete-claim" ${isDeleting ? 'disabled' : ''} class="rounded-full border border-[#8E1616]/20 bg-white px-5 py-2.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                      Batal
+                    </button>
+                    <button type="button" id="btn-confirm-delete-claim" ${isDeleting ? 'disabled' : ''} class="inline-flex items-center justify-center gap-1.5 rounded-full bg-red-700 px-5 py-2.5 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60 cursor-pointer">
+                      ${icon('trash-2', 'h-3.5 w-3.5')}
+                      ${isDeleting ? 'Menghapus...' : 'Ya, Hapus Data'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `;
+        }
+
         // ===================================================================
         // FULL & PARTIAL RENDERING + EVENT BINDING
         // ===================================================================
@@ -3585,6 +3953,7 @@ function doPost(e) {
             ${renderFooter()}
             ${renderProofPreviewModal()}
             ${renderRefundModal()}
+            ${renderDeleteConfirmModal()}
             ${renderGasSetupModal()}
           `;
 
@@ -3724,6 +4093,17 @@ function doPost(e) {
             });
           });
 
+          tableContainer.querySelectorAll('button[data-action="delete-claim"]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              const ticket = btn.getAttribute('data-ticket');
+              const found = state.claims.find((c) => c.ticketNumber === ticket);
+              if (found) {
+                state.deleteConfirmClaim = found;
+                render();
+              }
+            });
+          });
+
           tableContainer.querySelectorAll('select[data-action="status-change"]').forEach((sel) => {
             sel.addEventListener('change', async () => {
               const ticket = sel.getAttribute('data-ticket');
@@ -3738,16 +4118,9 @@ function doPost(e) {
               render();
               try {
                 const updated = await updateClaimStatus(ticket, nextStatus, currentClaim);
-                if (updated.status === 'Ditolak') {
-                  state.claims = state.claims.filter((item) => item.ticketNumber !== ticket);
-                  if (state.previewClaim && state.previewClaim.ticketNumber === ticket) {
-                    state.previewClaim = null;
-                  }
-                } else {
-                  state.claims = state.claims.map((item) =>
-                    item.ticketNumber === ticket ? updated : item,
-                  );
-                }
+                state.claims = state.claims.map((item) =>
+                  item.ticketNumber === ticket ? updated : item,
+                );
               } catch (err) {
                 state.actionError =
                   err instanceof Error ? err.message : 'Gagal memperbarui status pengajuan.';
@@ -3822,6 +4195,32 @@ function doPost(e) {
             bindText('field-nomorRekening', 'nomorRekening', (v) => v.replace(/[^0-9]/g, ''));
             bindText('field-namaPemilikRekening', 'namaPemilikRekening', (v) => v.toUpperCase());
             bindText('field-alasanKlaim', 'alasanKlaim');
+            bindText('field-namaPengaju', 'namaPengaju');
+
+            const kategoriPengajuEl = document.getElementById('field-kategoriPengaju');
+            if (kategoriPengajuEl) {
+              kategoriPengajuEl.addEventListener('change', (ev) => {
+                state.form.kategoriPengaju = ev.target.value;
+                state.form.subPengaju = '';
+                if (ev.target.value !== 'Cabang') {
+                  state.form.namaPengaju = '';
+                  delete state.form.errors.namaPengaju;
+                }
+                delete state.form.errors.kategoriPengaju;
+                delete state.form.errors.subPengaju;
+                render();
+                const restored = document.getElementById('field-kategoriPengaju');
+                if (restored) restored.focus();
+              });
+            }
+
+            const subPengajuEl = document.getElementById('field-subPengaju');
+            if (subPengajuEl) {
+              subPengajuEl.addEventListener('change', (ev) => {
+                state.form.subPengaju = ev.target.value;
+                clearPublicFieldError('subPengaju');
+              });
+            }
 
             const cabangEl = document.getElementById('field-cabang');
             if (cabangEl) {
@@ -3926,6 +4325,9 @@ function doPost(e) {
                 namaPemilikRekening: f.namaPemilikRekening.toUpperCase(),
                 nominalKlaim: f.nominalKlaim,
                 alasanKlaim: f.alasanKlaim,
+                kategoriPengaju: f.kategoriPengaju,
+                subPengaju: f.subPengaju,
+                namaPengaju: f.namaPengaju,
                 buktiTransferSebelumnya: f.buktiFile,
               };
 
@@ -3961,6 +4363,9 @@ function doPost(e) {
                   nominalDisplay: '',
                   buktiFile: null,
                   alasanKlaim: '',
+                  kategoriPengaju: '',
+                  subPengaju: '',
+                  namaPengaju: '',
                   errors: {},
                   submitError: null,
                   isSubmitting: false,
@@ -4601,6 +5006,68 @@ function doPost(e) {
                 }
               });
             }
+          }
+
+          // Delete Confirm Modal events
+          if (state.deleteConfirmClaim) {
+            const closeDeleteModal = () => {
+              if (state.deletingTicket) return;
+              state.deleteConfirmClaim = null;
+              render();
+            };
+            const closeDelBtn = document.getElementById('btn-close-delete-modal');
+            if (closeDelBtn) closeDelBtn.addEventListener('click', closeDeleteModal);
+            const cancelDelBtn = document.getElementById('btn-cancel-delete-claim');
+            if (cancelDelBtn) cancelDelBtn.addEventListener('click', closeDeleteModal);
+
+            const confirmDelBtn = document.getElementById('btn-confirm-delete-claim');
+            if (confirmDelBtn) {
+              confirmDelBtn.addEventListener('click', async () => {
+                const target = state.deleteConfirmClaim;
+                if (!target) return;
+                state.actionError = null;
+                state.actionNotice = null;
+                state.deletingTicket = target.ticketNumber;
+                render();
+                try {
+                  let deletedInSheet = false;
+                  if (state.gasSupportsDelete) {
+                    const res = await postToGas({
+                      action: 'deleteClaim',
+                      ticketId: target.ticketNumber,
+                    });
+                    deletedInSheet = Boolean(res && res.deleted);
+                  }
+                  if (!deletedInSheet) {
+                    saveLocalDeletedTicket(target.ticketNumber);
+                  }
+                  state.claims = state.claims.filter(
+                    (item) => item.ticketNumber !== target.ticketNumber,
+                  );
+                  if (state.previewClaim && state.previewClaim.ticketNumber === target.ticketNumber) {
+                    state.previewClaim = null;
+                  }
+                  state.deleteConfirmClaim = null;
+                  state.actionNotice = deletedInSheet
+                    ? `Data ${target.namaSiswa} (${target.ticketNumber}) berhasil dihapus dari dashboard & Google Sheets.`
+                    : `Data ${target.namaSiswa} (${target.ticketNumber}) dihapus dari dashboard. Untuk menghapus barisnya di Google Sheets secara permanen, hapus baris tersebut di Sheets atau perbarui skrip dari menu Konfigurasi Apps Script.`;
+                } catch (err) {
+                  state.actionError =
+                    err instanceof Error ? err.message : 'Gagal menghapus data pengajuan.';
+                } finally {
+                  state.deletingTicket = null;
+                  render();
+                }
+              });
+            }
+          }
+
+          const dismissNoticeBtn = document.getElementById('btn-dismiss-action-notice');
+          if (dismissNoticeBtn) {
+            dismissNoticeBtn.addEventListener('click', () => {
+              state.actionNotice = null;
+              render();
+            });
           }
 
           // GAS Setup Modal events

@@ -1605,10 +1605,6 @@ function doPost(e) {
             );
           }
 
-          state.gasSupportsDelete = Boolean(
-            res && res.capabilities && res.capabilities.deleteClaim,
-          );
-
           const localMetaMap = getLocalPengajuMetaMap();
           const normalized = rawList.map((raw) => {
             const item = normalizeClaimRecord(raw);
@@ -2027,9 +2023,6 @@ function doPost(e) {
           actionError: null,
           actionNotice: null,
           updatingTicket: null,
-          deletingTicket: null,
-          deleteConfirmClaim: null,
-          gasSupportsDelete: false,
           searchQuery: '',
           statusFilter: 'Semua',
           branchFilter: 'Semua',
@@ -2951,32 +2944,20 @@ function doPost(e) {
                   </td>
 
                   <td class="pl-2 pr-4 py-4 align-top whitespace-nowrap">
-                    <div class="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        data-action="refund"
-                        data-ticket="${escapeHtml(claim.ticketNumber)}"
-                        aria-label="Upload bukti transfer dan kirim ke ${escapeHtml(claim.namaSiswa)}"
-                        class="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
-                          claim.buktiTransferPengembalian
-                            ? 'border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
-                            : 'bg-[#8E1616] text-white hover:bg-[#731111]'
-                        }"
-                      >
-                        ${icon('send', 'h-3.5 w-3.5')}
-                        ${claim.buktiTransferPengembalian ? 'Terkirim / Ubah' : 'Upload & Kirim'}
-                      </button>
-                      <button
-                        type="button"
-                        data-action="delete-claim"
-                        data-ticket="${escapeHtml(claim.ticketNumber)}"
-                        aria-label="Hapus data ${escapeHtml(claim.namaSiswa)} (${escapeHtml(claim.ticketNumber)})"
-                        title="Hapus pengajuan"
-                        class="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-red-200 bg-white text-red-700 transition-colors hover:border-red-300 hover:bg-red-50 cursor-pointer"
-                      >
-                        ${icon('trash-2', 'h-3.5 w-3.5')}
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      data-action="refund"
+                      data-ticket="${escapeHtml(claim.ticketNumber)}"
+                      aria-label="Upload bukti transfer dan kirim ke ${escapeHtml(claim.namaSiswa)}"
+                      class="inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold transition-colors cursor-pointer ${
+                        claim.buktiTransferPengembalian
+                          ? 'border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
+                          : 'bg-[#8E1616] text-white hover:bg-[#731111]'
+                      }"
+                    >
+                      ${icon('send', 'h-3.5 w-3.5')}
+                      ${claim.buktiTransferPengembalian ? 'Terkirim / Ubah' : 'Upload & Kirim'}
+                    </button>
                   </td>
                 </tr>
               `;
@@ -3887,53 +3868,6 @@ function doPost(e) {
           `;
         }
 
-        function renderDeleteConfirmModal() {
-          const claim = state.deleteConfirmClaim;
-          if (!claim || state.mode !== 'admin') return '';
-          const isDeleting = state.deletingTicket === claim.ticketNumber;
-          return `
-            <div role="dialog" aria-modal="true" aria-labelledby="delete-modal-title" class="fixed inset-0 z-50 flex items-center justify-center bg-[#3D0C0C]/45 p-4 backdrop-blur-[2px]">
-              <div class="w-full max-w-md rounded-[20px] border border-[#8E1616]/15 bg-white shadow-xl">
-                <div class="flex items-center justify-between gap-4 border-b border-[#8E1616]/10 px-6 py-4">
-                  <div class="flex items-center gap-2.5">
-                    <div class="flex h-9 w-9 items-center justify-center rounded-full bg-red-50 text-red-700 border border-red-200">
-                      ${icon('trash-2', 'h-4 w-4')}
-                    </div>
-                    <h2 id="delete-modal-title" class="text-base font-extrabold tracking-tight text-[#3D0C0C]">
-                      Hapus Data Pengajuan
-                    </h2>
-                  </div>
-                  <button type="button" id="btn-close-delete-modal" aria-label="Tutup konfirmasi hapus" ${isDeleting ? 'disabled' : ''} class="rounded-full border border-[#8E1616]/15 p-2 text-[#8C5E5E] hover:bg-[#FFF0F0] hover:text-[#8E1616] cursor-pointer">
-                    ${icon('x', 'h-4 w-4')}
-                  </button>
-                </div>
-
-                <div class="space-y-4 p-6 text-sm text-[#3D0C0C]">
-                  <p class="leading-relaxed text-[#7E5454]">
-                    Apakah Anda yakin ingin menghapus data pengajuan klaim berikut dari dashboard?
-                  </p>
-                  <div class="rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-4 space-y-1">
-                    <p class="font-mono text-xs font-bold text-[#8E1616] tabular-nums">${escapeHtml(claim.ticketNumber)}</p>
-                    <p class="font-semibold text-[#3D0C0C]">${escapeHtml(claim.namaSiswa)}</p>
-                    <p class="text-xs text-[#7E5454] tabular-nums">
-                      ${escapeHtml(claim.cabang)} · ${escapeHtml(formatRupiah(claim.nominalKlaim))} · Status: ${escapeHtml(claim.status)}
-                    </p>
-                  </div>
-                  <div class="flex flex-col-reverse gap-2.5 pt-2 sm:flex-row sm:justify-end">
-                    <button type="button" id="btn-cancel-delete-claim" ${isDeleting ? 'disabled' : ''} class="rounded-full border border-[#8E1616]/20 bg-white px-5 py-2.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
-                      Batal
-                    </button>
-                    <button type="button" id="btn-confirm-delete-claim" ${isDeleting ? 'disabled' : ''} class="inline-flex items-center justify-center gap-1.5 rounded-full bg-red-700 px-5 py-2.5 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-60 cursor-pointer">
-                      ${icon('trash-2', 'h-3.5 w-3.5')}
-                      ${isDeleting ? 'Menghapus...' : 'Ya, Hapus Data'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          `;
-        }
-
         // ===================================================================
         // FULL & PARTIAL RENDERING + EVENT BINDING
         // ===================================================================
@@ -3953,7 +3887,6 @@ function doPost(e) {
             ${renderFooter()}
             ${renderProofPreviewModal()}
             ${renderRefundModal()}
-            ${renderDeleteConfirmModal()}
             ${renderGasSetupModal()}
           `;
 
@@ -4089,17 +4022,6 @@ function doPost(e) {
               const found = state.claims.find((c) => c.ticketNumber === ticket);
               if (found) {
                 openRefundModal(found, false);
-              }
-            });
-          });
-
-          tableContainer.querySelectorAll('button[data-action="delete-claim"]').forEach((btn) => {
-            btn.addEventListener('click', () => {
-              const ticket = btn.getAttribute('data-ticket');
-              const found = state.claims.find((c) => c.ticketNumber === ticket);
-              if (found) {
-                state.deleteConfirmClaim = found;
-                render();
               }
             });
           });
@@ -5003,60 +4925,6 @@ function doPost(e) {
                     rm.shareFeedback = 'Gagal membuka menu berbagi file perangkat.';
                     render();
                   }
-                }
-              });
-            }
-          }
-
-          // Delete Confirm Modal events
-          if (state.deleteConfirmClaim) {
-            const closeDeleteModal = () => {
-              if (state.deletingTicket) return;
-              state.deleteConfirmClaim = null;
-              render();
-            };
-            const closeDelBtn = document.getElementById('btn-close-delete-modal');
-            if (closeDelBtn) closeDelBtn.addEventListener('click', closeDeleteModal);
-            const cancelDelBtn = document.getElementById('btn-cancel-delete-claim');
-            if (cancelDelBtn) cancelDelBtn.addEventListener('click', closeDeleteModal);
-
-            const confirmDelBtn = document.getElementById('btn-confirm-delete-claim');
-            if (confirmDelBtn) {
-              confirmDelBtn.addEventListener('click', async () => {
-                const target = state.deleteConfirmClaim;
-                if (!target) return;
-                state.actionError = null;
-                state.actionNotice = null;
-                state.deletingTicket = target.ticketNumber;
-                render();
-                try {
-                  let deletedInSheet = false;
-                  if (state.gasSupportsDelete) {
-                    const res = await postToGas({
-                      action: 'deleteClaim',
-                      ticketId: target.ticketNumber,
-                    });
-                    deletedInSheet = Boolean(res && res.deleted);
-                  }
-                  if (!deletedInSheet) {
-                    saveLocalDeletedTicket(target.ticketNumber);
-                  }
-                  state.claims = state.claims.filter(
-                    (item) => item.ticketNumber !== target.ticketNumber,
-                  );
-                  if (state.previewClaim && state.previewClaim.ticketNumber === target.ticketNumber) {
-                    state.previewClaim = null;
-                  }
-                  state.deleteConfirmClaim = null;
-                  state.actionNotice = deletedInSheet
-                    ? `Data ${target.namaSiswa} (${target.ticketNumber}) berhasil dihapus dari dashboard & Google Sheets.`
-                    : `Data ${target.namaSiswa} (${target.ticketNumber}) dihapus dari dashboard. Untuk menghapus barisnya di Google Sheets secara permanen, hapus baris tersebut di Sheets atau perbarui skrip dari menu Konfigurasi Apps Script.`;
-                } catch (err) {
-                  state.actionError =
-                    err instanceof Error ? err.message : 'Gagal menghapus data pengajuan.';
-                } finally {
-                  state.deletingTicket = null;
-                  render();
                 }
               });
             }

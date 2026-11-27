@@ -200,9 +200,18 @@
           return !mime && /\.(jpe?g|png|webp|heic|heif)$/i.test(name);
         }
 
+        function isAllowedRefundProofFile(file) {
+          if (!file) return false;
+          const mime = String(file.type || '').toLowerCase();
+          const name = String(file.name || '').toLowerCase();
+          if (mime === 'application/pdf' || name.endsWith('.pdf')) return true;
+          return isAllowedProofImageFile(file);
+        }
+
         const GOOGLE_APPS_SCRIPT_TEMPLATE = `// Salin kode ini ke Google Apps Script (Extensions > Apps Script di Google Sheets)
 const FOLDER_ID = 'GANTI_DENGAN_ID_FOLDER_GOOGLE_DRIVE';
 const SHEET_NAME = 'KlaimPembayaran';
+const WIB_TIMEZONE = 'Asia/Jakarta';
 
 function normHeader_(h) {
   return String(h || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -216,6 +225,142 @@ function findCol_(headers, aliases) {
     }
   }
   return -1;
+}
+
+function formatWaktuWib_(val) {
+  if (val === null || val === undefined || val === '') return '';
+  try {
+    if (Object.prototype.toString.call(val) === '[object Date]') {
+      if (isNaN(val.getTime())) return '';
+      return Utilities.formatDate(val, WIB_TIMEZONE, 'dd/MM/yyyy, HH.mm.ss');
+    }
+    const s = String(val).replace(/^'+/, '').trim();
+    if (!s) return '';
+    const exactMatch = s.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})(?:,\\s*|\\s+)(\\d{1,2})[.:](\\d{2})(?:[.:](\\d{2}))?$/);
+    if (exactMatch) {
+      const dd = ('0' + exactMatch[1]).slice(-2);
+      const mm = ('0' + exactMatch[2]).slice(-2);
+      const yyyy = exactMatch[3];
+      const hh = ('0' + exactMatch[4]).slice(-2);
+      const mi = ('0' + exactMatch[5]).slice(-2);
+      const ss = ('0' + (exactMatch[6] || '00')).slice(-2);
+      return dd + '/' + mm + '/' + yyyy + ', ' + hh + '.' + mi + '.' + ss;
+    }
+    const parsed = new Date(s);
+    if (!isNaN(parsed.getTime())) {
+      return Utilities.formatDate(parsed, WIB_TIMEZONE, 'dd/MM/yyyy, HH.mm.ss');
+    }
+    return s;
+  } catch (err) {
+    return String(val || '');
+  }
+}
+
+function formatNoPonselText_(val) {
+  if (val === null || val === undefined || val === '') return '';
+  try {
+    const raw = String(val).replace(/^'+/, '').trim();
+    if (!raw) return '';
+    const digits = raw.replace(/[^0-9]/g, '');
+    if (!digits) return raw;
+    if (digits.indexOf('620') === 0) return digits.slice(2);
+    if (digits.indexOf('62') === 0 && digits.length >= 4) return '0' + digits.slice(2);
+    if (digits.indexOf('8') === 0) return '0' + digits;
+    return digits;
+  } catch (err) {
+    return String(val || '');
+  }
+}
+
+function formatPlainTextCell_(val) {
+  if (val === null || val === undefined) return '';
+  if (Object.prototype.toString.call(val) === '[object Date]') {
+    if (isNaN(val.getTime())) return '';
+    return Utilities.formatDate(val, WIB_TIMEZONE, 'dd/MM/yyyy');
+  }
+  return String(val).replace(/^'+/, '').trim();
+}
+
+function getLockedFormatColIndices_(headers) {
+  return {
+    ticket: findCol_(headers, ['tiket', 'ticketid', 'notiket', 'nomortiket', 'ticketnumber']),
+    createdAt: findCol_(headers, ['waktu', 'tanggalpengajuan', 'createdat', 'timestamp', 'tanggal']),
+    updatedAt: findCol_(headers, ['diperbarui', 'updatedat']),
+    noRegistrasi: findCol_(headers, ['noregist', 'noregistrasi', 'nomorregistrasi', 'regist']),
+    noPonsel: findCol_(headers, ['noponsel', 'nomorponsel', 'nohp', 'nowa', 'whatsapp']),
+    periode: findCol_(headers, ['periode', 'grade']),
+    noRekening: findCol_(headers, ['norekening', 'nomorrekening', 'rekening']),
+    notifAt: findCol_(headers, ['waktunotifikasi', 'notifikasiterkirimat'])
+  };
+}
+
+function lockTextColumns_(sheet, headers) {
+  if (!sheet || !headers || !headers.length) return;
+  const cols = getLockedFormatColIndices_(headers);
+  const totalRows = Math.max(2, sheet.getMaxRows());
+  const keys = ['ticket', 'createdAt', 'updatedAt', 'noRegistrasi', 'noPonsel', 'periode', 'noRekening', 'notifAt'];
+  for (let k = 0; k < keys.length; k++) {
+    const colIdx = cols[keys[k]];
+    if (colIdx !== -1) {
+      try {
+        sheet.getRange(1, colIdx + 1, totalRows, 1).setNumberFormat('@');
+      } catch (err) {
+        // Abaikan jika range terkunci
+      }
+    }
+  }
+}
+
+function repairAndLockSheetFormats_(sheet) {
+  if (!sheet) return;
+  const lastRow = sheet.getLastRow();
+  const lastCol = Math.max(1, sheet.getLastColumn());
+  const headers = sheet.getRange(1, 1, 1, lastCol).getValues()[0] || [];
+  lockTextColumns_(sheet, headers);
+  if (lastRow <= 1) return;
+
+  const cols = getLockedFormatColIndices_(headers);
+  const dataRows = lastRow - 1;
+  const range = sheet.getRange(2, 1, dataRows, lastCol);
+  const values = range.getValues();
+  const formats = range.getNumberFormats();
+
+  const fixCell = function(rIdx, colIdx, formatter) {
+    if (colIdx === -1) return;
+    try {
+      const currentVal = values[rIdx][colIdx];
+      const currentFmt = formats[rIdx][colIdx];
+      if (currentVal === '' || currentVal === null || currentVal === undefined) {
+        if (currentFmt !== '@') {
+          sheet.getRange(rIdx + 2, colIdx + 1).setNumberFormat('@');
+        }
+        return;
+      }
+      const fixedVal = formatter(currentVal);
+      if (currentFmt !== '@' || currentVal !== fixedVal) {
+        const cell = sheet.getRange(rIdx + 2, colIdx + 1);
+        cell.setNumberFormat('@');
+        cell.setValue(fixedVal);
+      }
+    } catch (err) {
+      // Jangan biarkan satu baris bermasalah menghentikan proses lain
+    }
+  };
+
+  for (let r = 0; r < values.length; r++) {
+    fixCell(r, cols.ticket, formatPlainTextCell_);
+    fixCell(r, cols.createdAt, formatWaktuWib_);
+    fixCell(r, cols.updatedAt, formatWaktuWib_);
+    fixCell(r, cols.notifAt, formatWaktuWib_);
+    fixCell(r, cols.noPonsel, formatNoPonselText_);
+    fixCell(r, cols.noRegistrasi, formatPlainTextCell_);
+    fixCell(r, cols.noRekening, formatPlainTextCell_);
+  }
+}
+
+function perbaikiDanKunciFormatSheet() {
+  const sheet = getOrCreateSheet_();
+  repairAndLockSheetFormats_(sheet);
 }
 
 function getOrCreateSheet_() {
@@ -236,7 +381,7 @@ function getOrCreateSheet_() {
   }
   if (!sheet) {
     sheet = ss.insertSheet(SHEET_NAME);
-    sheet.appendRow([
+    const defaultHeaders = [
       'ticketId', 'Tanggal Pengajuan', 'Diperbarui',
       'namaSiswa', 'noRegistrasi', 'noPonsel', 'cabang', 'program',
       'periode', 'namaBank', 'noRekening', 'namaPemilik',
@@ -244,7 +389,9 @@ function getOrCreateSheet_() {
       'fileUrl', 'fileName', 'mimeType',
       'refundUrl', 'refundFileName', 'refundMimeType',
       'catatanPengembalian', 'waktuNotifikasi'
-    ]);
+    ];
+    sheet.appendRow(defaultHeaders);
+    lockTextColumns_(sheet, defaultHeaders);
   }
   return sheet;
 }
@@ -320,7 +467,7 @@ function buildFolderFileIndex_() {
   return { byName: byName, list: list };
 }
 
-function findDriveFile_(fileName, ticketId, folderIndex) {
+function findDriveFile_(fileName, ticketId, folderIndex, isRefund) {
   const cleanName = String(fileName || '').trim();
   const cleanTicket = String(ticketId || '').trim();
   if (folderIndex) {
@@ -330,11 +477,16 @@ function findDriveFile_(fileName, ticketId, folderIndex) {
       return hit;
     }
     if (cleanTicket) {
-      const prefixA = (cleanTicket + '_').toLowerCase();
+      const prefixTarget = (isRefund ? (cleanTicket + '_refund') : (cleanTicket + '_')).toLowerCase();
       for (let i = 0; i < folderIndex.list.length; i++) {
         const item = folderIndex.list[i];
         const lower = item.name.toLowerCase();
-        if (lower.indexOf(prefixA) === 0 && lower.indexOf('_refund') === -1) {
+        if (isRefund) {
+          if (lower.indexOf(prefixTarget) === 0) {
+            ensurePublicShare_(item.file);
+            return item;
+          }
+        } else if (lower.indexOf(prefixTarget) === 0 && lower.indexOf('_refund') === -1) {
           ensurePublicShare_(item.file);
           return item;
         }
@@ -389,7 +541,7 @@ function doGet(e) {
         ensurePublicShare_(targetFile);
       } else {
         const idx = buildFolderFileIndex_();
-        const found = findDriveFile_(reqName, reqTicket, idx);
+        const found = findDriveFile_(reqName, reqTicket, idx, e.parameter.isRefund === 'true');
         if (found) targetFile = found.file;
       }
       if (!targetFile) {
@@ -425,6 +577,11 @@ function doGet(e) {
   }
 
   const sheet = getOrCreateSheet_();
+  try {
+    repairAndLockSheetFormats_(sheet);
+  } catch (err) {
+    // Tetap lanjutkan pembacaan data meski auto-lock menemui kendala
+  }
   const range = sheet.getDataRange();
   const rows = range.getValues();
   if (rows.length <= 1) {
@@ -480,36 +637,51 @@ function doGet(e) {
       : '';
     let proofName = col.fileName !== -1 && r[col.fileName]
       ? String(r[col.fileName])
-      : (!isRealUrl_(proofVal) && proofVal ? String(proofVal) : 'bukti-transfer');
+      : (!isRealUrl_(proofVal) && proofVal ? String(proofVal) : '');
     let proofMime = col.mimeType !== -1 && r[col.mimeType] ? String(r[col.mimeType]) : '';
 
-    if (!proofUrl && (proofName !== 'bukti-transfer' || ticketStr)) {
+    if (!proofUrl && (proofName || ticketStr)) {
       if (!folderIndex) folderIndex = buildFolderFileIndex_();
-      const resolvedDrive = findDriveFile_(proofName !== 'bukti-transfer' ? proofName : '', ticketStr, folderIndex);
+      const resolvedDrive = findDriveFile_(proofName, ticketStr, folderIndex, false);
       if (resolvedDrive) {
         proofUrl = resolvedDrive.url;
-        if (proofName === 'bukti-transfer') proofName = resolvedDrive.name;
+        if (!proofName) proofName = resolvedDrive.name;
         if (!proofMime) proofMime = resolvedDrive.mimeType;
       }
     }
+    if (proofUrl && !proofName) proofName = 'bukti-transfer';
 
     const refundVal = col.refundUrl !== -1 ? r[col.refundUrl] : '';
-    const refundUrl = col.refundUrl !== -1
+    let refundUrl = col.refundUrl !== -1
       ? extractCellUrl_(refundVal, richTexts[i][col.refundUrl], formulas[i][col.refundUrl])
       : '';
+    let refundName = col.refundFileName !== -1 && r[col.refundFileName]
+      ? String(r[col.refundFileName])
+      : (!isRealUrl_(refundVal) && refundVal ? String(refundVal) : '');
+    let refundMime = col.refundMimeType !== -1 && r[col.refundMimeType] ? String(r[col.refundMimeType]) : '';
+
+    if (!refundUrl && (refundName || ticketStr)) {
+      if (!folderIndex) folderIndex = buildFolderFileIndex_();
+      const resolvedRefundDrive = findDriveFile_(refundName, ticketStr, folderIndex, true);
+      if (resolvedRefundDrive) {
+        refundUrl = resolvedRefundDrive.url;
+        if (!refundName) refundName = resolvedRefundDrive.name;
+        if (!refundMime) refundMime = resolvedRefundDrive.mimeType;
+      }
+    }
 
     data.push({
       ticketId: ticketStr,
-      createdAt: col.createdAt !== -1 ? r[col.createdAt] : '',
-      updatedAt: col.updatedAt !== -1 ? r[col.updatedAt] : '',
+      createdAt: col.createdAt !== -1 ? formatWaktuWib_(r[col.createdAt]) : '',
+      updatedAt: col.updatedAt !== -1 ? formatWaktuWib_(r[col.updatedAt]) : '',
       namaSiswa: col.namaSiswa !== -1 ? r[col.namaSiswa] : '',
-      noRegistrasi: col.noRegistrasi !== -1 ? String(r[col.noRegistrasi] || '') : '',
-      noPonsel: col.noPonsel !== -1 ? String(r[col.noPonsel] || '') : '',
+      noRegistrasi: col.noRegistrasi !== -1 ? formatPlainTextCell_(r[col.noRegistrasi]) : '',
+      noPonsel: col.noPonsel !== -1 ? formatNoPonselText_(r[col.noPonsel]) : '',
       cabang: col.cabang !== -1 ? r[col.cabang] : '',
       program: col.program !== -1 ? r[col.program] : '',
       periode: col.periode !== -1 ? r[col.periode] : '',
       namaBank: col.namaBank !== -1 ? r[col.namaBank] : '',
-      noRekening: col.noRekening !== -1 ? String(r[col.noRekening] || '') : '',
+      noRekening: col.noRekening !== -1 ? formatPlainTextCell_(r[col.noRekening]) : '',
       namaPemilik: col.namaPemilik !== -1 ? r[col.namaPemilik] : '',
       nominal: Number(col.nominal !== -1 ? r[col.nominal] : 0) || 0,
       alasan: col.alasan !== -1 ? r[col.alasan] : '',
@@ -522,17 +694,17 @@ function doGet(e) {
       fileName: proofName,
       mimeType: proofMime || 'image/png',
       refundUrl: refundUrl,
-      refundFileName: col.refundFileName !== -1 ? (r[col.refundFileName] || '') : '',
-      refundMimeType: col.refundMimeType !== -1 ? (r[col.refundMimeType] || 'image/png') : 'image/png',
+      refundFileName: refundName,
+      refundMimeType: refundMime || (/\.pdf$/i.test(refundName) ? 'application/pdf' : 'image/png'),
       catatanPengembalian: col.catatan !== -1 ? (r[col.catatan] || '') : '',
-      notifikasiTerkirimAt: col.notifAt !== -1 ? (r[col.notifAt] || '') : ''
+      notifikasiTerkirimAt: col.notifAt !== -1 ? formatWaktuWib_(r[col.notifAt]) : ''
     });
   }
   return ContentService
     .createTextOutput(JSON.stringify({
       ok: true,
       status: 'success',
-      capabilities: { deleteClaim: true, proxyImage: true },
+      capabilities: { proxyImage: true, lockFormats: true },
       data: data.reverse()
     }))
     .setMimeType(ContentService.MimeType.JSON);
@@ -541,7 +713,8 @@ function doGet(e) {
 function doPost(e) {
   const payload = JSON.parse(e.postData.contents);
   const sheet = getOrCreateSheet_();
-  const nowIso = new Date().toISOString();
+  const nowDate = new Date();
+  const nowWib = formatWaktuWib_(nowDate);
   const range = sheet.getDataRange();
   const rows = range.getValues();
   const headers = rows[0] || [];
@@ -549,12 +722,19 @@ function doPost(e) {
   const statusCol = findCol_(headers, ['status', 'statusklaim', 'persetujuanstatus']);
   const updatedCol = findCol_(headers, ['diperbarui', 'updatedat']);
 
+  if (payload.action === 'repairFormats') {
+    repairAndLockSheetFormats_(sheet);
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, status: 'success', repaired: true }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
   if (payload.action === 'updateStatus') {
     for (let i = 1; i < rows.length; i++) {
       const rowTicket = String(rows[i][ticketCol !== -1 ? ticketCol : 0] || '');
       if (rowTicket === String(payload.ticketId)) {
         const rowNum = i + 1;
-        if (updatedCol !== -1) sheet.getRange(rowNum, updatedCol + 1).setValue(nowIso);
+        if (updatedCol !== -1) sheet.getRange(rowNum, updatedCol + 1).setNumberFormat('@').setValue(nowWib);
         if (statusCol !== -1) sheet.getRange(rowNum, statusCol + 1).setValue(payload.newStatus);
         return ContentService
           .createTextOutput(JSON.stringify({ ok: true, status: 'success' }))
@@ -596,28 +776,46 @@ function doPost(e) {
   }
 
   if (payload.action === 'uploadRefundProof') {
+    const ensureRefundCol = function(aliases, headerName) {
+      let idx = findCol_(headers, aliases);
+      if (idx === -1) {
+        idx = headers.length;
+        sheet.getRange(1, idx + 1).setValue(headerName);
+        headers.push(headerName);
+      }
+      return idx;
+    };
     for (let i = 1; i < rows.length; i++) {
       const rowTicket = String(rows[i][ticketCol !== -1 ? ticketCol : 0] || '');
       if (rowTicket === String(payload.ticketId)) {
         const rowNum = i + 1;
         const savedRefund = saveBase64ToDrive_(payload.fileData, payload.fileName, payload.mimeType, payload.ticketId + '_refund');
-        if (updatedCol !== -1) sheet.getRange(rowNum, updatedCol + 1).setValue(nowIso);
+        if (updatedCol !== -1) sheet.getRange(rowNum, updatedCol + 1).setNumberFormat('@').setValue(nowWib);
         if (payload.newStatus && statusCol !== -1) sheet.getRange(rowNum, statusCol + 1).setValue(payload.newStatus);
-        const refundUrlCol = findCol_(headers, ['refundurl', 'refundproofurl', 'buktipengembalian']);
-        const refundNameCol = findCol_(headers, ['refundfilename']);
-        const refundMimeCol = findCol_(headers, ['refundmimetype']);
-        const noteCol = findCol_(headers, ['catatanpengembalian']);
-        const notifCol = findCol_(headers, ['waktunotifikasi', 'notifikasiterkirimat']);
-        if (refundUrlCol !== -1) sheet.getRange(rowNum, refundUrlCol + 1).setValue(savedRefund.viewUrl);
-        if (refundNameCol !== -1) sheet.getRange(rowNum, refundNameCol + 1).setValue(payload.fileName || 'refund');
-        if (refundMimeCol !== -1) sheet.getRange(rowNum, refundMimeCol + 1).setValue(payload.mimeType || 'image/png');
-        if (noteCol !== -1) sheet.getRange(rowNum, noteCol + 1).setValue(payload.note || '');
-        if (notifCol !== -1) sheet.getRange(rowNum, notifCol + 1).setValue(nowIso);
+        const refundUrlCol = ensureRefundCol(['refundurl', 'refundproofurl', 'buktipengembalian'], 'refundUrl');
+        const refundNameCol = ensureRefundCol(['refundfilename'], 'refundFileName');
+        const refundMimeCol = ensureRefundCol(['refundmimetype'], 'refundMimeType');
+        const noteCol = ensureRefundCol(['catatanpengembalian'], 'catatanPengembalian');
+        const notifCol = ensureRefundCol(['waktunotifikasi', 'notifikasiterkirimat'], 'waktuNotifikasi');
+        sheet.getRange(rowNum, refundUrlCol + 1).setValue(savedRefund.viewUrl);
+        sheet.getRange(rowNum, refundNameCol + 1).setValue(payload.fileName || 'bukti-refund.png');
+        sheet.getRange(rowNum, refundMimeCol + 1).setValue(payload.mimeType || (/\.pdf$/i.test(payload.fileName || '') ? 'application/pdf' : 'image/png'));
+        sheet.getRange(rowNum, noteCol + 1).setValue(payload.note || '');
+        sheet.getRange(rowNum, notifCol + 1).setNumberFormat('@').setValue(nowWib);
         return ContentService
-          .createTextOutput(JSON.stringify({ ok: true, status: 'success', refundProofUrl: savedRefund.viewUrl, finalMessage: payload.message }))
+          .createTextOutput(JSON.stringify({
+            ok: true,
+            status: 'success',
+            refundProofUrl: savedRefund.viewUrl,
+            driveFileId: savedRefund.fileId,
+            finalMessage: payload.message
+          }))
           .setMimeType(ContentService.MimeType.JSON);
       }
     }
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: 'Tiket tidak ditemukan.' }))
+      .setMimeType(ContentService.MimeType.JSON);
   }
 
   const lock = LockService.getScriptLock();
@@ -660,23 +858,29 @@ function doPost(e) {
       if (idx !== -1) newRow[idx] = value;
     };
 
+    const formattedCreatedAt = formatWaktuWib_(payload.createdAt || nowDate) || nowWib;
+    const formattedPhone = formatNoPonselText_(payload.noPonsel);
+    const formattedReg = formatPlainTextCell_(payload.noRegistrasi);
+    const formattedRek = formatPlainTextCell_(payload.noRekening);
+    const formattedPeriode = formatPlainTextCell_(payload.grade || payload.periode);
+
     setByAliases(['tiket', 'ticketid', 'notiket', 'nomortiket', 'ticketnumber'], finalTicketId);
-    setByAliases(['waktu', 'tanggalpengajuan', 'createdat', 'timestamp', 'tanggal'], payload.createdAt || nowIso);
-    setByAliases(['diperbarui', 'updatedat'], nowIso);
-    setByAliases(['namasiswa', 'namalengkap', 'nama'], payload.namaSiswa || '');
-    setByAliases(['noregist', 'noregistrasi', 'nomorregistrasi', 'regist'], payload.noRegistrasi || '');
-    setByAliases(['noponsel', 'nomorponsel', 'nohp', 'nowa', 'whatsapp'], payload.noPonsel || '');
+    setByAliases(['waktu', 'tanggalpengajuan', 'createdat', 'timestamp', 'tanggal'], formattedCreatedAt);
+    setByAliases(['diperbarui', 'updatedat'], nowWib);
+    setByAliases(['namasiswa', 'namalengkap', 'nama'], String(payload.namaSiswa || '').trim());
+    setByAliases(['noregist', 'noregistrasi', 'nomorregistrasi', 'regist'], formattedReg);
+    setByAliases(['noponsel', 'nomorponsel', 'nohp', 'nowa', 'whatsapp'], formattedPhone);
     if (findCol_(headers, ['cabang']) !== -1) {
       setByAliases(['cabang'], payload.cabang || payload.program || '');
       setByAliases(['program', 'programkursus', 'durasi'], payload.programKursus || payload.durasi || '');
-      setByAliases(['periode', 'grade'], payload.periode || payload.grade || '');
+      setByAliases(['periode', 'grade'], formattedPeriode);
     } else {
       setByAliases(['program'], payload.program || payload.cabang || '');
       setByAliases(['durasi'], payload.durasi || payload.programKursus || '');
-      setByAliases(['grade', 'periode'], payload.grade || payload.periode || '');
+      setByAliases(['grade', 'periode'], formattedPeriode);
     }
     setByAliases(['bank', 'namabank'], payload.namaBank || '');
-    setByAliases(['norekening', 'nomorrekening', 'rekening'], payload.noRekening || '');
+    setByAliases(['norekening', 'nomorrekening', 'rekening'], formattedRek);
     setByAliases(['namarekening', 'namapemilik', 'namapemilikrekening', 'atasnama'], payload.namaPemilik || '');
     setByAliases(['nominal', 'nominalklaim', 'jumlah'], payload.nominal || 0);
     setByAliases(['alasan', 'alasanklaim', 'keterangan'], payload.alasan || '');
@@ -684,18 +888,31 @@ function doPost(e) {
     setByAliases(['subpengaju', 'namacs', 'bagiancabang', 'detailpengaju'], payload.subPengaju || '');
     setByAliases(['namapengaju', 'namapic', 'petugaspengaju', 'namapengisi'], payload.namaPengaju || '');
     setByAliases(['status', 'statusklaim', 'persetujuanstatus'], payload.status || 'Menunggu Verifikasi');
-    // Simpan URL Google Drive asli (bukan sekadar nama file) agar pratinjau admin selalu dapat memuat gambar
+    // Simpan URL Google Drive asli (bukan sekadar nama file) agar pratinjau admin selalu dapat memuat gambar/PDF
     setByAliases(['fileurl', 'buktipembayaransebelumnya', 'buktitransfersebelumnya', 'buktitransfer', 'buktipembayaran', 'buktiurl', 'proofurl', 'bukti'], saved.viewUrl);
-    setByAliases(['filename', 'namafile'], payload.fileName || 'bukti-transfer');
-    setByAliases(['mimetype'], payload.mimeType || 'image/png');
+    setByAliases(['filename', 'namafile'], payload.fileName || (saved.viewUrl ? 'bukti-transfer' : ''));
+    setByAliases(['mimetype'], payload.mimeType || (saved.viewUrl ? 'image/png' : ''));
 
-    sheet.appendRow(newRow);
+    // Kunci format Plain Text (@) pada sel dan kolom sebelum menulis agar nol di depan & format waktu tidak berubah
+    lockTextColumns_(sheet, headers);
+    const targetRow = sheet.getLastRow() + 1;
+    const lockedCols = getLockedFormatColIndices_(headers);
+    const lockKeys = ['ticket', 'createdAt', 'updatedAt', 'noRegistrasi', 'noPonsel', 'periode', 'noRekening', 'notifAt'];
+    for (let k = 0; k < lockKeys.length; k++) {
+      const colIdx = lockedCols[lockKeys[k]];
+      if (colIdx !== -1) {
+        sheet.getRange(targetRow, colIdx + 1).setNumberFormat('@');
+      }
+    }
+    sheet.getRange(targetRow, 1, 1, newRow.length).setValues([newRow]);
 
     return ContentService
       .createTextOutput(JSON.stringify({
         ok: true,
         status: 'success',
         ticketId: finalTicketId,
+        createdAt: formattedCreatedAt,
+        noPonsel: formattedPhone,
         proofUrl: saved.viewUrl,
         fileUrl: saved.viewUrl,
         driveFileId: saved.fileId
@@ -767,9 +984,25 @@ function doPost(e) {
           return Number.isFinite(parsed) ? parsed : 0;
         }
 
+        function formatLocalPhoneNumber(phone) {
+          try {
+            const raw = String(phone ?? '').replace(/^'+/, '').trim();
+            if (!raw) return '';
+            const digits = raw.replace(/[^0-9]/g, '');
+            if (!digits) return raw;
+            if (digits.startsWith('620')) return digits.slice(2);
+            if (digits.startsWith('62') && digits.length >= 4) return `0${digits.slice(2)}`;
+            if (digits.startsWith('8')) return `0${digits}`;
+            return digits;
+          } catch {
+            return String(phone ?? '').trim();
+          }
+        }
+
         function normalizePhoneToWa(phone) {
           const digits = String(phone ?? '').replace(/[^0-9]/g, '');
           if (!digits) return '';
+          if (digits.startsWith('620')) return `62${digits.slice(3)}`;
           if (digits.startsWith('62')) return digits;
           if (digits.startsWith('0')) return `62${digits.slice(1)}`;
           if (digits.startsWith('8')) return `62${digits}`;
@@ -853,16 +1086,91 @@ function doPost(e) {
           return `KLM-${yyyy}${mm}${dd}-${branchCode}${seqStr}`;
         }
 
-        function formatIndonesianDateTime(isoString) {
-          const parsed = new Date(isoString);
-          if (Number.isNaN(parsed.getTime())) return isoString || '';
-          return new Intl.DateTimeFormat('id-ID', {
-            day: '2-digit',
-            month: 'short',
-            year: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-          }).format(parsed);
+        function parseFlexibleDate(value) {
+          if (value === null || value === undefined || value === '') return null;
+          if (value instanceof Date) {
+            return Number.isNaN(value.getTime()) ? null : value;
+          }
+          const str = String(value).replace(/^'+/, '').trim();
+          if (!str) return null;
+
+          const idMatch = str.match(
+            /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:,\s*|\s+)?(?:(\d{1,2})[.:](\d{2})(?:[.:](\d{2}))?)?$/,
+          );
+          if (idMatch) {
+            const day = Number(idMatch[1]);
+            const month = Number(idMatch[2]);
+            const year = Number(idMatch[3]);
+            const hour = Number(idMatch[4] || 0);
+            const minute = Number(idMatch[5] || 0);
+            const second = Number(idMatch[6] || 0);
+            if (
+              month >= 1 &&
+              month <= 12 &&
+              day >= 1 &&
+              day <= 31 &&
+              hour >= 0 &&
+              hour <= 23 &&
+              minute >= 0 &&
+              minute <= 59 &&
+              second >= 0 &&
+              second <= 59
+            ) {
+              const utcMs = Date.UTC(year, month - 1, day, hour - 7, minute, second);
+              const candidate = new Date(utcMs);
+              if (!Number.isNaN(candidate.getTime())) {
+                return candidate;
+              }
+            }
+          }
+
+          const parsed = new Date(str);
+          return Number.isNaN(parsed.getTime()) ? null : parsed;
+        }
+
+        function formatSheetDateTimeWib(value = new Date()) {
+          try {
+            const parsed = parseFlexibleDate(value);
+            if (!parsed) return String(value || '').trim();
+            const parts = new Intl.DateTimeFormat('en-GB', {
+              timeZone: 'Asia/Jakarta',
+              day: '2-digit',
+              month: '2-digit',
+              year: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              hour12: false,
+            }).formatToParts(parsed);
+            const getPart = (type) => (parts.find((p) => p.type === type) || {}).value || '00';
+            const day = getPart('day');
+            const month = getPart('month');
+            const year = getPart('year');
+            const rawHour = getPart('hour');
+            const hour = rawHour === '24' ? '00' : rawHour;
+            const minute = getPart('minute');
+            const second = getPart('second');
+            return `${day}/${month}/${year}, ${hour}.${minute}.${second}`;
+          } catch {
+            return String(value || '').trim();
+          }
+        }
+
+        function formatIndonesianDateTime(dateInput) {
+          try {
+            const parsed = parseFlexibleDate(dateInput);
+            if (!parsed) return String(dateInput || '');
+            return new Intl.DateTimeFormat('id-ID', {
+              day: '2-digit',
+              month: 'short',
+              year: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              timeZone: 'Asia/Jakarta',
+            }).format(parsed);
+          } catch {
+            return String(dateInput || '');
+          }
         }
 
         function formatFileSize(bytes) {
@@ -884,11 +1192,12 @@ function doPost(e) {
             errors.nomorRegistrasi = 'Nomor registrasi wajib diisi.';
           }
 
-          const phoneDigits = input.nomorPonsel.replace(/[^0-9]/g, '');
+          const normalizedPhone = formatLocalPhoneNumber(input.nomorPonsel);
+          const phoneDigits = normalizedPhone.replace(/[^0-9]/g, '');
           if (!phoneDigits) {
             errors.nomorPonsel = 'Nomor ponsel wajib diisi.';
           } else if (phoneDigits.length < 9 || phoneDigits.length > 15) {
-            errors.nomorPonsel = 'Masukkan nomor ponsel aktif yang valid (9–15 digit).';
+            errors.nomorPonsel = 'Masukkan nomor ponsel aktif yang valid (9–15 digit, contoh: 081234567890).';
           }
 
           if (!input.cabang.trim()) {
@@ -923,7 +1232,7 @@ function doPost(e) {
           }
 
           if (!input.buktiTransferSebelumnya) {
-            errors.buktiTransferSebelumnya = 'Unggah bukti transfer sebelumnya berupa gambar/foto (JPG, PNG, atau WEBP).';
+            errors.buktiTransferSebelumnya = 'Bukti transfer sebelumnya wajib diunggah.';
           }
 
           if (!input.alasanKlaim.trim()) {
@@ -1082,7 +1391,7 @@ function doPost(e) {
           return `\uFEFF${lines.join('\r\n')}`;
         }
 
-        function buildWhatsAppRefundMessage(claim, _refundProofName, refundNote) {
+        function buildWhatsAppRefundMessage(claim, _refundProofName, refundNote, refundProofUrl) {
           const lines = [
             `*KONFIRMASI PENGEMBALIAN KLAIM SISWA*`,
             `Kampung Inggris Language Center`,
@@ -1099,6 +1408,11 @@ function doPost(e) {
 
           if (refundNote && refundNote.trim()) {
             lines.push(`• Catatan Finance: ${refundNote.trim()}`);
+          }
+
+          const cleanUrl = String(refundProofUrl || '').trim();
+          if (cleanUrl && /^https?:\/\//i.test(cleanUrl)) {
+            lines.push(`• Bukti Transfer: ${cleanUrl}`);
           }
 
           lines.push('', 'Status: *SELESAI / DITRANSFER*. Silakan periksa mutasi rekening. Terima kasih.');
@@ -1188,6 +1502,96 @@ function doPost(e) {
           return candidates[0] || '';
         }
 
+        let pdfJsLoadPromise = null;
+        function loadPdfJsLib() {
+          if (typeof window !== 'undefined' && window.pdfjsLib) {
+            return Promise.resolve(window.pdfjsLib);
+          }
+          if (pdfJsLoadPromise) return pdfJsLoadPromise;
+          pdfJsLoadPromise = new Promise((resolve, reject) => {
+            if (typeof document === 'undefined') {
+              reject(new Error('Document unavailable'));
+              return;
+            }
+            const script = document.createElement('script');
+            script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+            script.async = true;
+            script.onload = () => {
+              if (window.pdfjsLib) {
+                window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+                  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                resolve(window.pdfjsLib);
+              } else {
+                reject(new Error('pdfjsLib not found'));
+              }
+            };
+            script.onerror = () => reject(new Error('Gagal memuat penampil PDF'));
+            document.head.appendChild(script);
+          });
+          return pdfJsLoadPromise;
+        }
+
+        async function renderPdfDataUrlToCanvasStage(stageEl) {
+          if (!stageEl || stageEl.dataset.pdfRendered === '1') return;
+          stageEl.dataset.pdfRendered = '1';
+          const dataUrl = stageEl.getAttribute('data-pdf-data-url') || '';
+          const fileName = stageEl.getAttribute('data-pdf-name') || 'dokumen.pdf';
+          if (!dataUrl.startsWith('data:')) return;
+
+          try {
+            const pdfjsLib = await loadPdfJsLib();
+            const base64Part = dataUrl.includes(',') ? dataUrl.split(',')[1] : '';
+            const binStr = atob(base64Part);
+            const bytes = new Uint8Array(binStr.length);
+            for (let i = 0; i < binStr.length; i++) bytes[i] = binStr.charCodeAt(i);
+
+            const pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+            const totalPages = Math.min(pdfDoc.numPages || 1, 10);
+            const containerWidth = Math.max(280, Math.min((stageEl.clientWidth || 440) - 24, 720));
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+            const pagesWrap = document.createElement('div');
+            pagesWrap.className = 'space-y-3 p-3 max-h-[420px] overflow-y-auto bg-[#FEF9F9]';
+
+            const badge = document.createElement('div');
+            badge.className = 'flex items-center justify-between text-[11px] font-medium text-[#7E5454] px-1';
+            badge.textContent = `Dokumen PDF (${pdfDoc.numPages} halaman)`;
+            pagesWrap.appendChild(badge);
+
+            for (let p = 1; p <= totalPages; p++) {
+              const page = await pdfDoc.getPage(p);
+              const baseViewport = page.getViewport({ scale: 1 });
+              const scale = containerWidth / (baseViewport.width || 600);
+              const viewport = page.getViewport({ scale });
+
+              const canvas = document.createElement('canvas');
+              canvas.width = Math.max(1, Math.floor(viewport.width * dpr));
+              canvas.height = Math.max(1, Math.floor(viewport.height * dpr));
+              canvas.style.width = `${Math.floor(viewport.width)}px`;
+              canvas.style.height = `${Math.floor(viewport.height)}px`;
+              canvas.className = 'mx-auto block rounded-lg border border-[#8E1616]/10 bg-white shadow-sm';
+              canvas.setAttribute('aria-label', `${fileName} halaman ${p}`);
+
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+                await page.render({ canvasContext: ctx, viewport }).promise;
+              }
+              pagesWrap.appendChild(canvas);
+            }
+
+            stageEl.innerHTML = '';
+            stageEl.appendChild(pagesWrap);
+          } catch {
+            stageEl.innerHTML = `
+              <div class="flex h-48 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-[#7E5454]">
+                <p class="font-semibold text-[#3D0C0C]">${escapeHtml(fileName)}</p>
+                <p class="text-xs text-[#8C5E5E]">Klik tombol Unduh atau Buka Drive di atas untuk membuka dokumen PDF ini.</p>
+              </div>
+            `;
+          }
+        }
+
         function resolveProofPreviewUrl(proof) {
           if (!proof) return '';
           const raw = isRealUrl(proof.dataUrl)
@@ -1212,6 +1616,37 @@ function doPost(e) {
 
         function buildWhatsAppShareTextUrl(message) {
           return `https://wa.me/?text=${encodeURIComponent(message)}`;
+        }
+
+        async function copyTextToClipboardSafe(text) {
+          const str = String(text || '');
+          if (!str) return false;
+          try {
+            if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+              await navigator.clipboard.writeText(str);
+              return true;
+            }
+          } catch {
+            // Fallback ke execCommand di bawah
+          }
+          try {
+            if (typeof document !== 'undefined' && document.body) {
+              const ta = document.createElement('textarea');
+              ta.value = str;
+              ta.setAttribute('readonly', '');
+              ta.style.position = 'fixed';
+              ta.style.opacity = '0';
+              ta.style.pointerEvents = 'none';
+              document.body.appendChild(ta);
+              ta.select();
+              const ok = document.execCommand('copy');
+              document.body.removeChild(ta);
+              return Boolean(ok);
+            }
+          } catch {
+            return false;
+          }
+          return false;
         }
 
         // ===================================================================
@@ -1381,6 +1816,9 @@ function doPost(e) {
             raw.buktiTransferPengembalian && typeof raw.buktiTransferPengembalian === 'object'
               ? {
                   ...raw.buktiTransferPengembalian,
+                  mimeType: /\.pdf$/i.test(String(raw.buktiTransferPengembalian.name || ''))
+                    ? 'application/pdf'
+                    : raw.buktiTransferPengembalian.mimeType,
                   dataUrl: isRealUrl(raw.buktiTransferPengembalian.dataUrl)
                     ? raw.buktiTransferPengembalian.dataUrl
                     : isRealUrl(raw.buktiTransferPengembalian.remoteUrl)
@@ -1393,10 +1831,12 @@ function doPost(e) {
               : resolvedRefundUrl || resolvedRefundName !== 'bukti-pengembalian'
                 ? {
                     name: resolvedRefundName,
-                    mimeType: String(
-                      pick('refundMimeType') ||
-                        inferMimeTypeFromName(resolvedRefundName, 'image/png'),
-                    ),
+                    mimeType: /\.pdf$/i.test(resolvedRefundName)
+                      ? 'application/pdf'
+                      : String(
+                          pick('refundMimeType') ||
+                            inferMimeTypeFromName(resolvedRefundName, 'image/png'),
+                        ),
                     size: 0,
                     dataUrl: resolvedRefundUrl,
                     remoteUrl: resolvedRefundUrl,
@@ -1434,21 +1874,30 @@ function doPost(e) {
               'Menunggu Verifikasi',
           );
 
-          const createdAtVal = String(
+          const rawCreatedAtVal = String(
             pick('createdAt', 'timestamp', 'waktu', 'tanggal', 'date') ?? '',
           );
+          const createdAtVal = formatSheetDateTimeWib(rawCreatedAtVal) || rawCreatedAtVal;
+          const rawUpdatedAtVal = String(pick('updatedAt', 'diperbarui') ?? '');
+          const updatedAtVal = rawUpdatedAtVal
+            ? formatSheetDateTimeWib(rawUpdatedAtVal) || rawUpdatedAtVal
+            : createdAtVal;
+          const rawNotifAtVal = String(pick('notifikasiTerkirimAt', 'waktuNotifikasi') ?? '');
+          const notifAtVal = rawNotifAtVal
+            ? formatSheetDateTimeWib(rawNotifAtVal) || rawNotifAtVal
+            : '';
 
           return {
             ...raw,
             id: String(pick('id') || ticket),
             ticketNumber: ticket,
             createdAt: createdAtVal,
-            updatedAt: String(pick('updatedAt', 'diperbarui') || createdAtVal),
+            updatedAt: updatedAtVal,
             namaSiswa: String(pick('namaSiswa', 'namaLengkap', 'nama') ?? ''),
             nomorRegistrasi: String(
               pick('noRegistrasi', 'nomorRegistrasi', 'noRegist', 'regist') ?? '',
-            ),
-            nomorPonsel: String(
+            ).replace(/^'+/, ''),
+            nomorPonsel: formatLocalPhoneNumber(
               pick('noPonsel', 'nomorPonsel', 'noHp', 'nomorHp', 'noWa', 'whatsapp') ?? '',
             ),
             cabang: resolvedCabang,
@@ -1457,7 +1906,7 @@ function doPost(e) {
             namaBank: String(pick('namaBank', 'bank', 'namaBankTujuan') ?? ''),
             nomorRekening: String(
               pick('noRekening', 'nomorRekening', 'rekening') ?? '',
-            ),
+            ).replace(/^'+/, ''),
             namaPemilikRekening: String(
               pick(
                 'namaPemilik',
@@ -1476,7 +1925,7 @@ function doPost(e) {
             buktiTransferPengembalian: refundProof,
             status: resolvedStatus,
             catatanPengembalian: String(pick('catatanPengembalian') ?? ''),
-            notifikasiTerkirimAt: String(pick('notifikasiTerkirimAt', 'waktuNotifikasi') ?? ''),
+            notifikasiTerkirimAt: notifAtVal,
           };
         }
 
@@ -1507,9 +1956,11 @@ function doPost(e) {
           return new Promise((resolve, reject) => {
             const reader = new FileReader();
             reader.onload = () => {
+              const inferredMime =
+                file.type || inferMimeTypeFromName(file.name, 'application/octet-stream');
               resolve({
                 name: file.name,
-                mimeType: file.type || 'application/octet-stream',
+                mimeType: inferredMime,
                 size: file.size,
                 dataUrl: typeof reader.result === 'string' ? reader.result : '',
               });
@@ -1722,10 +2173,6 @@ function doPost(e) {
         }
 
         async function submitClaim(input) {
-          if (!input.buktiTransferSebelumnya) {
-            throw new Error('Bukti transfer sebelumnya wajib dilampirkan.');
-          }
-
           const now = new Date();
           const existingClaims = await fetchAllRawClaimsForSequence();
           const branchCode = getBranchCode(input.cabang);
@@ -1738,14 +2185,18 @@ function doPost(e) {
               ? crypto.randomUUID()
               : `claim-${Date.now()}`;
 
+          const formattedCreatedAt = formatSheetDateTimeWib(now);
+          const formattedPhone = formatLocalPhoneNumber(input.nomorPonsel);
+          const proofObj = input.buktiTransferSebelumnya || null;
+
           const record = {
             id,
             ticketNumber,
-            createdAt: now.toISOString(),
-            updatedAt: now.toISOString(),
+            createdAt: formattedCreatedAt,
+            updatedAt: formattedCreatedAt,
             namaSiswa: input.namaSiswa.trim(),
             nomorRegistrasi: input.nomorRegistrasi.trim(),
-            nomorPonsel: input.nomorPonsel.trim(),
+            nomorPonsel: formattedPhone,
             cabang: input.cabang.trim(),
             programKursus: input.programKursus.trim(),
             periode: input.periode.trim(),
@@ -1760,17 +2211,18 @@ function doPost(e) {
               String(input.kategoriPengaju || '').trim() === 'Cabang'
                 ? String(input.namaPengaju || '').trim()
                 : '',
-            buktiTransferSebelumnya: input.buktiTransferSebelumnya,
+            buktiTransferSebelumnya: proofObj || undefined,
             status: 'Menunggu Verifikasi',
           };
 
-          const base64Data = extractPureBase64(input.buktiTransferSebelumnya.dataUrl);
+          const base64Data = proofObj && proofObj.dataUrl ? extractPureBase64(proofObj.dataUrl) : '';
 
           const result = await postToGas({
             ticketId: ticketNumber,
+            createdAt: formattedCreatedAt,
             namaSiswa: record.namaSiswa,
             noRegistrasi: record.nomorRegistrasi,
-            noPonsel: record.nomorPonsel,
+            noPonsel: formattedPhone,
             program: record.cabang,
             durasi: record.programKursus,
             grade: record.periode,
@@ -1783,8 +2235,8 @@ function doPost(e) {
             subPengaju: record.subPengaju,
             namaPengaju: record.namaPengaju,
             fileData: base64Data,
-            fileName: input.buktiTransferSebelumnya.name,
-            mimeType: input.buktiTransferSebelumnya.mimeType || 'application/octet-stream',
+            fileName: proofObj ? proofObj.name : '',
+            mimeType: proofObj ? (proofObj.mimeType || 'application/octet-stream') : '',
           });
 
           if (result && result.claim) {
@@ -1797,7 +2249,7 @@ function doPost(e) {
           }
           saveLocalPengajuMeta(record.ticketNumber, record);
           const remoteUrl = (result && (result.proofUrl || result.fileUrl)) || '';
-          if (remoteUrl) {
+          if (remoteUrl && record.buktiTransferSebelumnya) {
             record.buktiTransferSebelumnya = {
               ...record.buktiTransferSebelumnya,
               remoteUrl,
@@ -1816,7 +2268,7 @@ function doPost(e) {
               'Status klaim yang sudah Selesai / Ditransfer dikunci dan tidak dapat diubah lagi.',
             );
           }
-          const updatedAt = new Date().toISOString();
+          const updatedAt = formatSheetDateTimeWib(new Date());
 
           const result = await postToGas({
             action: 'updateStatus',
@@ -1833,7 +2285,7 @@ function doPost(e) {
         }
 
         async function uploadRefundProofAndNotify(params) {
-          const nowIso = new Date().toISOString();
+          const nowIso = formatSheetDateTimeWib(new Date());
           const {
             claim,
             refundProof,
@@ -1850,21 +2302,88 @@ function doPost(e) {
           const tujuanNotifikasi =
             sendToGroup && sendToPhone ? 'keduanya' : sendToGroup ? 'grup' : 'ponsel';
 
-          if (nextStatus === 'Selesai / Ditransfer' && claim.status !== 'Selesai / Ditransfer') {
-            await postToGas({
-              action: 'updateStatus',
+          let savedProof = { ...refundProof };
+          let finalMessage = message;
+          const hasLocalFileToUpload = Boolean(
+            refundProof &&
+              typeof refundProof.dataUrl === 'string' &&
+              refundProof.dataUrl.startsWith('data:'),
+          );
+
+          if (hasLocalFileToUpload) {
+            const uploadRes = await postToGas({
+              action: 'uploadRefundProof',
               ticketId: claim.ticketNumber,
-              newStatus: 'Selesai / Ditransfer',
+              newStatus: nextStatus,
+              fileData: extractPureBase64(refundProof.dataUrl),
+              fileName: refundProof.name,
+              mimeType:
+                refundProof.mimeType || inferMimeTypeFromName(refundProof.name, 'image/png'),
+              note: (note || '').trim(),
+              message,
             });
+            const uploadedUrl =
+              (uploadRes && (uploadRes.refundProofUrl || uploadRes.proofUrl || uploadRes.fileUrl)) ||
+              '';
+            const driveFileId =
+              (uploadRes && uploadRes.driveFileId) ||
+              extractGoogleDriveFileId(uploadedUrl) ||
+              '';
+            savedProof = {
+              ...refundProof,
+              ...(uploadedUrl ? { remoteUrl: uploadedUrl } : {}),
+              ...(driveFileId ? { driveFileId } : {}),
+            };
+            if (uploadedUrl && !finalMessage.includes(uploadedUrl)) {
+              const defaultMsgWithoutUrl = buildWhatsAppRefundMessage(
+                claim,
+                savedProof.name,
+                note,
+                '',
+              ).trim();
+              if (finalMessage.trim() === defaultMsgWithoutUrl) {
+                finalMessage = buildWhatsAppRefundMessage(
+                  claim,
+                  savedProof.name,
+                  note,
+                  uploadedUrl,
+                );
+              } else {
+                finalMessage = `${finalMessage.trim()}\n• Bukti Transfer: ${uploadedUrl}`;
+              }
+            }
+          } else {
+            const existingProofUrl =
+              (savedProof && isRealUrl(savedProof.remoteUrl) && /^https?:\/\//i.test(savedProof.remoteUrl)
+                ? savedProof.remoteUrl
+                : savedProof && savedProof.driveFileId
+                  ? getDriveCanonicalViewUrl(savedProof.driveFileId)
+                  : '');
+            if (existingProofUrl && !finalMessage.includes(existingProofUrl)) {
+              const defaultMsgWithoutUrl = buildWhatsAppRefundMessage(
+                claim,
+                savedProof.name,
+                note,
+                '',
+              ).trim();
+              if (finalMessage.trim() === defaultMsgWithoutUrl) {
+                finalMessage = buildWhatsAppRefundMessage(
+                  claim,
+                  savedProof.name,
+                  note,
+                  existingProofUrl,
+                );
+              } else {
+                finalMessage = `${finalMessage.trim()}\n• Bukti Transfer: ${existingProofUrl}`;
+              }
+            }
           }
 
           return {
             ...claim,
-            buktiTransferPengembalian: {
-              ...refundProof,
-            },
+            buktiTransferPengembalian: savedProof,
             catatanPengembalian: (note || '').trim() || claim.catatanPengembalian,
-            pesanNotifikasiTerkirim: message,
+            pesanNotifikasiTerkirim: finalMessage,
             tujuanNotifikasi,
             notifikasiTerkirimAt: nowIso,
             status: nextStatus,
@@ -1879,7 +2398,8 @@ function doPost(e) {
           const id = String((params && params.id) || '').trim();
           const fileName = String((params && params.fileName) || '').trim();
           const ticketId = String((params && params.ticketId) || '').trim();
-          const cacheKey = `${id}|${fileName}|${ticketId}`;
+          const isRefund = Boolean(params && params.isRefund);
+          const cacheKey = `${id}|${fileName}|${ticketId}|${isRefund ? 'refund' : 'awal'}`;
           if (gasProofCache.has(cacheKey)) return gasProofCache.get(cacheKey);
           try {
             const sep = WEB_APP_URL.includes('?') ? '&' : '?';
@@ -1887,6 +2407,7 @@ function doPost(e) {
             if (id) qs.set('id', id);
             if (fileName) qs.set('fileName', fileName);
             if (ticketId) qs.set('ticketId', ticketId);
+            if (isRefund) qs.set('isRefund', 'true');
             const controller =
               typeof AbortController !== 'undefined' ? new AbortController() : null;
             const timer = controller ? setTimeout(() => controller.abort(), 8000) : null;
@@ -1914,10 +2435,28 @@ function doPost(e) {
         }
 
         async function proofFileToFileObject(proof) {
-          const targetUrl =
-            resolveProofPreviewUrl(proof) ||
-            (proof && isRealUrl(proof.dataUrl) ? proof.dataUrl : '') ||
-            (proof && isRealUrl(proof.remoteUrl) ? proof.remoteUrl : '');
+          let targetUrl =
+            proof &&
+            typeof proof.dataUrl === 'string' &&
+            (proof.dataUrl.startsWith('data:') || proof.dataUrl.startsWith('blob:'))
+              ? proof.dataUrl
+              : '';
+          if (!targetUrl && proof && (proof.driveFileId || proof.name) && isGasConfigured()) {
+            const proxyRes = await fetchGasProofProxy({
+              id: proof.driveFileId || '',
+              fileName: proof.name || '',
+              isRefund: true,
+            });
+            if (proxyRes && proxyRes.dataUrl) {
+              targetUrl = proxyRes.dataUrl;
+            }
+          }
+          if (!targetUrl) {
+            targetUrl =
+              resolveProofPreviewUrl(proof) ||
+              (proof && isRealUrl(proof.dataUrl) ? proof.dataUrl : '') ||
+              (proof && isRealUrl(proof.remoteUrl) ? proof.remoteUrl : '');
+          }
           if (!targetUrl) {
             throw new Error('URL file bukti transfer tidak tersedia.');
           }
@@ -2031,7 +2570,7 @@ function doPost(e) {
           previewClaim: null,
           previewTab: 'awal',
 
-          refundModal: null, // { claims, selectedTicket, refundProof, note, message, sendToGroup, sendToPhone, markAsTransferred, error, isSaving, completedRecord, copiedMsg, copiedImg, copiedShareLink, copiedDriveLink, shareFeedback }
+          refundModal: null, // { claims, selectedTicket, refundProof, note, message, sendToGroup, sendToPhone, markAsTransferred, error, isSaving, completedRecord, copiedMsg, copiedImg, copiedDriveLink, shareFeedback }
 
           gasCopied: false,
         };
@@ -2149,7 +2688,7 @@ function doPost(e) {
                   Pilih foto atau gambar bukti transfer dari perangkat Anda
                 </span>
                 <span class="mt-1 text-xs text-[#8C5E5E]">
-                  Hanya gambar/foto (JPG, PNG, WEBP) · Bukan PDF · Maksimal 5 MB
+                  Format JPG, PNG, WEBP · Maksimal 5 MB
                 </span>
               </label>
             `;
@@ -2413,7 +2952,7 @@ function doPost(e) {
 
                       <div class="sm:col-span-2">
                         <label for="field-buktiTransferSebelumnya" class="block text-sm font-semibold text-[#3D0C0C]">
-                          Upload Bukti Transfer Sebelumnya (Hanya Gambar / Foto) <span class="text-[#8E1616]">*</span>
+                          Upload Bukti Transfer Sebelumnya <span class="text-[#8E1616]">*</span>
                         </label>
                         <input
                           id="field-buktiTransferSebelumnya"
@@ -2695,7 +3234,7 @@ function doPost(e) {
                   </div>
                   <div>
                     <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Lampiran Bukti Transfer</dt>
-                    <dd class="mt-1 text-[#3D0C0C]">${escapeHtml(claim.buktiTransferSebelumnya.name)}</dd>
+                    <dd class="mt-1 text-[#3D0C0C]">${escapeHtml((claim.buktiTransferSebelumnya && claim.buktiTransferSebelumnya.name) || '-')}</dd>
                   </div>
                   <div class="sm:col-span-2">
                     <dt class="font-mono text-[10px] font-semibold uppercase tracking-[0.14em] text-[#8C5E5E]">Alasan Pengajuan</dt>
@@ -2862,6 +3401,7 @@ function doPost(e) {
                 'border-[#8E1616]/20 bg-white text-[#3D0C0C]';
               const isUpdating = state.updatingTicket === claim.ticketNumber;
               const isLockedTransferred = claim.status === 'Selesai / Ditransfer';
+
               return `
                 <tr class="hover:bg-[#FEF9F9]/80 transition-colors">
                   <td class="pl-4 pr-2 py-4 align-top whitespace-nowrap">
@@ -3185,7 +3725,7 @@ function doPost(e) {
           `;
         }
 
-        function renderProofViewer(title, file, ticketNumber) {
+        function renderProofViewer(title, file, ticketNumber, proofKind = 'awal') {
           if (!file) {
             return `<div class="rounded-2xl border border-[#8E1616]/10 bg-[#FEF9F9] p-6 text-center text-sm text-[#8C5E5E]">Lampiran bukti transfer belum tersedia.</div>`;
           }
@@ -3199,11 +3739,12 @@ function doPost(e) {
           const rawRemoteUrl = isRealUrl(file.remoteUrl) ? String(file.remoteUrl).trim() : '';
           const rawUrl = rawDataUrl || rawRemoteUrl || (file.driveFileId ? `https://drive.google.com/file/d/${file.driveFileId}/view` : '');
           const driveId = file.driveFileId || extractGoogleDriveFileId(rawUrl) || '';
-          const openDriveUrl = rawRemoteUrl
-            ? getDriveCanonicalViewUrl(rawRemoteUrl)
-            : driveId
-              ? getDriveCanonicalViewUrl(driveId)
-              : '';
+          const openDriveUrl =
+            rawRemoteUrl && /^https?:\/\//i.test(rawRemoteUrl)
+              ? getDriveCanonicalViewUrl(rawRemoteUrl)
+              : driveId
+                ? getDriveCanonicalViewUrl(driveId)
+                : '';
           const downloadUrl = driveId ? getDriveDownloadUrl(driveId) : rawUrl;
           const iframePreviewUrl = driveId ? getDrivePreviewIframeUrl(driveId) : '';
           const candidates = rawUrl ? getDriveCandidateUrls(rawUrl, isPdf ? 'application/pdf' : file.mimeType) : [];
@@ -3218,6 +3759,7 @@ function doPost(e) {
                 data-proof-missing-url
                 data-ticket="${escapeHtml(ticketNumber || '')}"
                 data-file-name="${escapeHtml(file.name || '')}"
+                data-proof-kind="${escapeHtml(proofKind)}"
                 class="flex flex-col items-center justify-center gap-3 p-6 text-center text-sm text-[#7E5454]"
               >
                 ${icon('file-text', 'h-10 w-10 text-[#8E1616]')}
@@ -3256,15 +3798,30 @@ function doPost(e) {
               </div>
             `;
           } else if (isPdf) {
-            viewerHtml = iframePreviewUrl || rawUrl
-              ? `<iframe title="${escapeHtml(title)}" src="${escapeHtml(iframePreviewUrl || rawUrl)}" class="h-96 w-full bg-white" referrerpolicy="no-referrer"></iframe>`
-              : `
-                <div class="flex h-56 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-[#7E5454]">
-                  ${icon('file-text', 'h-10 w-10 text-[#8E1616]')}
-                  <p class="font-semibold text-[#3D0C0C]">${escapeHtml(file.name)}</p>
-                  <p class="text-xs text-[#8C5E5E]">Gunakan tombol Unduh atau Buka Drive untuk melihat dokumen ini.</p>
+            if (rawDataUrl.startsWith('data:')) {
+              viewerHtml = `
+                <div
+                  data-pdf-canvas-stage
+                  data-pdf-data-url="${escapeHtml(rawDataUrl)}"
+                  data-pdf-name="${escapeHtml(file.name || 'bukti-pengembalian.pdf')}"
+                >
+                  <div class="flex h-48 flex-col items-center justify-center gap-2 p-6 text-center text-xs text-[#7E5454]">
+                    ${icon('file-text', 'h-8 w-8 text-[#8E1616] animate-pulse')}
+                    <span>Memuat halaman PDF...</span>
+                  </div>
                 </div>
               `;
+            } else {
+              viewerHtml = iframePreviewUrl
+                ? `<iframe title="${escapeHtml(title)}" src="${escapeHtml(iframePreviewUrl)}" class="h-96 w-full bg-white" referrerpolicy="no-referrer"></iframe>`
+                : `
+                  <div class="flex h-56 flex-col items-center justify-center gap-2 p-6 text-center text-sm text-[#7E5454]">
+                    ${icon('file-text', 'h-10 w-10 text-[#8E1616]')}
+                    <p class="font-semibold text-[#3D0C0C]">${escapeHtml(file.name)}</p>
+                    <p class="text-xs text-[#8C5E5E]">Klik tombol Unduh atau Buka Drive untuk melihat berkas ini.</p>
+                  </div>
+                `;
+            }
           } else {
             const firstSrc = candidates[0] || rawUrl;
             viewerHtml = `
@@ -3273,6 +3830,7 @@ function doPost(e) {
                 data-drive-id="${escapeHtml(driveId)}"
                 data-file-name="${escapeHtml(file.name || '')}"
                 data-ticket="${escapeHtml(ticketNumber || '')}"
+                data-proof-kind="${escapeHtml(proofKind)}"
               >
                 <img
                   data-proof-img
@@ -3321,7 +3879,7 @@ function doPost(e) {
                 ${
                   rawUrl
                     ? `
-                      <div class="flex items-center gap-2">
+                      <div class="flex flex-wrap items-center gap-2">
                         <a
                           href="${escapeHtml(downloadUrl)}"
                           ${rawDataUrl.startsWith('data:') ? `download="${escapeHtml(file.name)}"` : 'target="_blank" rel="noopener noreferrer"'}
@@ -3360,11 +3918,9 @@ function doPost(e) {
         function renderProofPreviewModal() {
           const claim = state.previewClaim;
           if (!claim) return '';
-          const showRefund =
-            state.previewTab === 'refund' && Boolean(claim.buktiTransferPengembalian);
           return `
             <div role="dialog" aria-modal="true" aria-labelledby="proof-modal-title" class="fixed inset-0 z-50 flex items-center justify-center bg-[#3D0C0C]/45 p-4 backdrop-blur-[2px]">
-              <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto rounded-[20px] border border-[#8E1616]/15 bg-white shadow-xl">
+              <div class="max-h-[90vh] w-full max-w-5xl overflow-y-auto rounded-[20px] border border-[#8E1616]/15 bg-white shadow-xl">
                 <div class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-[#8E1616]/10 bg-white px-6 py-4">
                   <div>
                     <p class="font-mono text-xs font-semibold text-[#8E1616] tabular-nums">${escapeHtml(claim.ticketNumber)}</p>
@@ -3415,34 +3971,24 @@ function doPost(e) {
                     </div>
                   </dl>
 
-                  ${
-                    claim.buktiTransferPengembalian
-                      ? `
-                        <div class="flex items-center gap-1 rounded-full bg-[#FEF9F9] border border-[#8E1616]/10 p-1 w-fit">
-                          <button type="button" data-preview-tab="awal" class="rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${!showRefund ? 'bg-[#8E1616] text-white' : 'text-[#7E5454] hover:text-[#8E1616]'}">
-                            Bukti Transfer Sebelumnya
-                          </button>
-                          <button type="button" data-preview-tab="refund" class="rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${showRefund ? 'bg-[#8E1616] text-white' : 'text-[#7E5454] hover:text-[#8E1616]'}">
-                            Bukti Transfer Pengembalian
-                          </button>
-                        </div>
-                      `
-                      : ''
-                  }
-
-                  ${
-                    showRefund && claim.buktiTransferPengembalian
-                      ? renderProofViewer(
-                          'Bukti Transfer Pengembalian Dana (Dari Finance)',
-                          claim.buktiTransferPengembalian,
-                          claim.ticketNumber,
-                        )
-                      : renderProofViewer(
-                          'Bukti Transfer Sebelumnya (Dari Siswa)',
-                          claim.buktiTransferSebelumnya,
-                          claim.ticketNumber,
-                        )
-                  }
+                  <div class="grid grid-cols-1 gap-5 lg:grid-cols-2">
+                    <div class="rounded-2xl border border-[#8E1616]/10 bg-white p-4">
+                      ${renderProofViewer(
+                        'Bukti Pembayaran Sebelumnya (Dari Siswa)',
+                        claim.buktiTransferSebelumnya,
+                        claim.ticketNumber,
+                        'awal',
+                      )}
+                    </div>
+                    <div class="rounded-2xl border border-[#8E1616]/10 bg-white p-4">
+                      ${renderProofViewer(
+                        'Bukti Transfer Klaim / Pengembalian (Dari Finance)',
+                        claim.buktiTransferPengembalian,
+                        claim.ticketNumber,
+                        'refund',
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -3462,8 +4008,8 @@ function doPost(e) {
           const savedAttachment =
             (rm.completedRecord && rm.completedRecord.buktiTransferPengembalian) ||
             rm.refundProof;
-          const waShareTextUrl = buildWhatsAppShareTextUrl(finalMessage);
           const waUrl = buildWhatsAppUrl(claim.nomorPonsel, finalMessage);
+          const waShareTextUrl = buildWhatsAppShareTextUrl(finalMessage);
           const canWebShareFiles =
             typeof navigator !== 'undefined' && typeof navigator.share === 'function';
 
@@ -3474,39 +4020,57 @@ function doPost(e) {
                   ${icon('check-circle-2', 'mt-0.5 h-5 w-5 shrink-0 text-emerald-700')}
                   <div class="space-y-1">
                     <p class="font-semibold">
-                      Bukti transfer tersimpan &amp; pesan rincian klaim siap dikirim.
+                      ${rm.copiedMsg ? 'Bukti transfer tersimpan &amp; pesan beserta tautan bukti otomatis disalin.' : 'Bukti transfer pengembalian tersimpan &amp; status diperbarui.'}
                     </p>
                     <p class="text-xs leading-relaxed text-emerald-800">
-                      Tautan undangan grup (<code class="font-mono">chat.whatsapp.com</code>) tidak
-                      mendukung pengisian teks otomatis dari URL. Gunakan tombol
-                      <strong>Pilih Grup &amp; Kirim Teks Otomatis</strong> agar rincian nama hingga
-                      nominal langsung terisi di WhatsApp, atau salin teks di bawah ini lalu tempel
-                      (<kbd class="rounded bg-white/80 px-1">Ctrl+V</kbd>) di dalam grup.
+                      ${
+                        savedAttachment && savedAttachment.remoteUrl
+                          ? 'Tautan bukti transfer Google Drive sudah otomatis disertakan di pesan rincian. Tinggal buka WhatsApp dan kirim/tempel pesan.'
+                          : 'Gunakan tombol kirim di bawah untuk membuka WhatsApp dengan isi rincian klaim otomatis terisi.'
+                      }
                     </p>
                   </div>
                 </div>
 
+                <div class="flex flex-wrap items-center gap-2.5">
+                  ${
+                    rm.sendToPhone
+                      ? `
+                        <a href="${escapeHtml(waUrl)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 whitespace-nowrap shrink-0">
+                          ${icon('send', 'h-4 w-4')}
+                          Kirim ke WA Siswa (${escapeHtml(claim.nomorPonsel)})
+                        </a>
+                      `
+                      : ''
+                  }
+                  ${
+                    rm.sendToGroup
+                      ? `
+                        <a href="${escapeHtml(WHATSAPP_GROUP_URL)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full bg-[#8E1616] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#731111] whitespace-nowrap shrink-0">
+                          ${icon('users', 'h-4 w-4')}
+                          Buka Grup WhatsApp
+                        </a>
+                        <a href="${escapeHtml(waShareTextUrl)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full border border-[#8E1616] bg-white px-4 py-2.5 text-sm font-semibold text-[#8E1616] transition-colors hover:bg-[#FFF0F0] whitespace-nowrap shrink-0">
+                          ${icon('send', 'h-4 w-4')}
+                          Kirim via WhatsApp
+                        </a>
+                      `
+                      : ''
+                  }
+                </div>
+
                 <div class="rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-4 space-y-2.5">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
+                  <div class="flex items-center justify-between gap-2">
                     <span class="font-mono text-[10px] font-semibold uppercase tracking-[0.12em] text-[#8C5E5E]">
-                      Rincian Klaim untuk Grup &amp; Siswa
+                      Rincian Klaim &amp; Bukti Transfer yang Dikirim
                     </span>
-                    <div class="flex flex-wrap items-center gap-2">
-                      <button type="button" id="btn-copy-wa-msg" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
-                        ${
-                          rm.copiedMsg
-                            ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Rincian Disalin`
-                            : `${icon('copy', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Rincian Klaim`
-                        }
-                      </button>
-                      <button type="button" id="btn-copy-wa-share-link" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
-                        ${
-                          rm.copiedShareLink
-                            ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Link WA Disalin`
-                            : `${icon('link-2', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Link Pesan WA`
-                        }
-                      </button>
-                    </div>
+                    <button type="button" id="btn-copy-wa-msg" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3 py-1 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                      ${
+                        rm.copiedMsg
+                          ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Pesan Tersalin`
+                          : `${icon('copy', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Rincian`
+                      }
+                    </button>
                   </div>
                   <pre data-testid="completed-claim-message" class="max-h-56 overflow-auto whitespace-pre-wrap rounded-xl border border-[#8E1616]/10 bg-white p-3 font-sans text-xs leading-relaxed text-[#3D0C0C]">${escapeHtml(finalMessage)}</pre>
                 </div>
@@ -3517,7 +4081,7 @@ function doPost(e) {
                       <div class="flex flex-col gap-3 rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-4 sm:flex-row sm:items-center sm:justify-between">
                         <div class="flex items-center gap-3 min-w-0">
                           ${
-                            savedAttachment.mimeType.startsWith('image/') && resolveProofPreviewUrl(savedAttachment)
+                            String(savedAttachment.mimeType || '').startsWith('image/') && resolveProofPreviewUrl(savedAttachment)
                               ? `<img data-proof-thumb data-candidates="${escapeHtml(JSON.stringify(getDriveCandidateUrls(savedAttachment.dataUrl || savedAttachment.remoteUrl, savedAttachment.mimeType)))}" data-candidate-idx="0" src="${escapeHtml(resolveProofPreviewUrl(savedAttachment))}" alt="Lampiran ${escapeHtml(savedAttachment.name)}" referrerpolicy="no-referrer" class="h-14 w-14 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
                               : `<div class="flex h-14 w-14 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-6 w-6')}</div>`
                           }
@@ -3527,8 +4091,8 @@ function doPost(e) {
                               ${savedAttachment.size > 0 ? formatFileSize(savedAttachment.size) : 'Lampiran siap'}
                               ${
                                 savedAttachment.remoteUrl
-                                  ? ' · Link Google Drive tersedia'
-                                  : ' · Hubungkan WEB_APP_URL untuk link Google Drive'
+                                  ? ' · Tersimpan di Google Drive'
+                                  : ' · Tersimpan di sesi ini'
                               }
                             </p>
                           </div>
@@ -3542,35 +4106,41 @@ function doPost(e) {
                                   ${
                                     rm.copiedDriveLink
                                       ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Link Drive Disalin`
-                                      : `${icon('link-2', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Link Bukti Drive`
+                                      : `${icon('link-2', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Link Drive`
                                   }
                                 </button>
                               `
                               : ''
                           }
                           ${
-                            savedAttachment.mimeType.startsWith('image/')
+                            String(savedAttachment.mimeType || '').startsWith('image/')
                               ? `
                                 <button type="button" id="btn-copy-proof-img" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
                                   ${
                                     rm.copiedImg
                                       ? `${icon('check', 'h-3.5 w-3.5 text-emerald-600')} Gambar Disalin`
-                                      : `${icon('copy', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Gambar Bukti`
+                                      : `${icon('copy', 'h-3.5 w-3.5 text-[#8E1616]')} Salin Gambar`
                                   }
                                 </button>
                               `
                               : ''
                           }
-                          <a href="${escapeHtml(savedAttachment.dataUrl || savedAttachment.remoteUrl || '')}" download="${escapeHtml(savedAttachment.name)}" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0]">
-                            ${icon('download', 'h-3.5 w-3.5 text-[#8E1616]')}
-                            Unduh Bukti
-                          </a>
+                          ${
+                            resolveProofPreviewUrl(savedAttachment)
+                              ? `
+                                <a href="${escapeHtml(savedAttachment.dataUrl || getDriveDownloadUrl(savedAttachment.remoteUrl) || resolveProofPreviewUrl(savedAttachment))}" ${String(savedAttachment.dataUrl || '').startsWith('data:') ? `download="${escapeHtml(savedAttachment.name)}"` : 'target="_blank" rel="noopener noreferrer"'} class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0]">
+                                  ${icon('download', 'h-3.5 w-3.5 text-[#8E1616]')}
+                                  Unduh
+                                </a>
+                              `
+                              : ''
+                          }
                           ${
                             canWebShareFiles
                               ? `
                                 <button type="button" id="btn-share-proof-file" class="inline-flex items-center gap-1.5 rounded-full border border-[#8E1616]/20 bg-white px-3.5 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
                                   ${icon('share-2', 'h-3.5 w-3.5 text-[#8E1616]')}
-                                  Bagikan File
+                                  Kirim File ke WA
                                 </button>
                               `
                               : ''
@@ -3587,38 +4157,10 @@ function doPost(e) {
                     : ''
                 }
 
-                <div class="flex flex-col gap-3 border-t border-[#8E1616]/10 pt-4">
-                  <div class="flex flex-wrap items-center gap-2.5">
-                    ${
-                      rm.sendToGroup
-                        ? `
-                          <a href="${escapeHtml(waShareTextUrl)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full bg-[#8E1616] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#731111] whitespace-nowrap shrink-0">
-                            ${icon('send', 'h-4 w-4')}
-                            Pilih Grup &amp; Kirim Teks Otomatis
-                          </a>
-                          <a href="${escapeHtml(WHATSAPP_GROUP_URL)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full border border-[#8E1616] bg-white px-5 py-2.5 text-sm font-semibold text-[#8E1616] transition-colors hover:bg-[#FFF0F0] whitespace-nowrap shrink-0">
-                            ${icon('users', 'h-4 w-4')}
-                            Buka Grup Tujuan
-                          </a>
-                        `
-                        : ''
-                    }
-                    ${
-                      rm.sendToPhone
-                        ? `
-                          <a href="${escapeHtml(waUrl)}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center justify-center gap-2 rounded-full bg-emerald-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-emerald-700 whitespace-nowrap shrink-0">
-                            ${icon('external-link', 'h-4 w-4')}
-                            Kirim ke WhatsApp Siswa (${escapeHtml(claim.nomorPonsel)})
-                          </a>
-                        `
-                        : ''
-                    }
-                  </div>
-                  <div class="flex justify-end">
-                    <button type="button" id="btn-refund-done" class="rounded-full border border-[#8E1616]/20 bg-white px-5 py-2 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
-                      Selesai
-                    </button>
-                  </div>
+                <div class="flex justify-end border-t border-[#8E1616]/10 pt-4">
+                  <button type="button" id="btn-refund-done" class="rounded-full border border-[#8E1616]/20 bg-white px-5 py-2 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
+                    Selesai
+                  </button>
                 </div>
               </div>
             `
@@ -3637,36 +4179,36 @@ function doPost(e) {
 
                 <div>
                   <label for="refund-proof-input" class="block text-sm font-semibold text-[#3D0C0C]">
-                    Upload Bukti Transfer Pengembalian (Hanya Gambar / Foto) <span class="text-[#8E1616]">*</span>
+                    Upload Bukti Transfer Pengembalian (Gambar / PDF) <span class="text-[#8E1616]">*</span>
                   </label>
-                  <input id="refund-proof-input" type="file" accept="image/*" class="sr-only" />
+                  <input id="refund-proof-input" type="file" accept="image/*,application/pdf,.pdf" class="sr-only" />
                   ${
                     !rm.refundProof
                       ? `
                         <label for="refund-proof-input" class="mt-1.5 flex cursor-pointer flex-col items-center justify-center rounded-2xl border border-dashed border-[#8E1616]/20 bg-[#FEF9F9] px-6 py-4 text-center transition-colors hover:border-[#8E1616]/50 hover:bg-[#FFF0F0]/50">
                           ${icon('upload', 'h-5 w-5 text-[#8E1616]')}
-                          <span class="mt-2 text-sm font-semibold text-[#3D0C0C]">Pilih foto atau gambar bukti transfer pengembalian</span>
-                          <span class="mt-1 text-xs text-[#8C5E5E]">Hanya gambar/foto (JPG, PNG, WEBP) · Bukan PDF · Maksimal 5 MB</span>
+                          <span class="mt-2 text-sm font-semibold text-[#3D0C0C]">Pilih foto, gambar, atau file PDF bukti transfer pengembalian</span>
+                          <span class="mt-1 text-xs text-[#8C5E5E]">Format JPG, PNG, WEBP, atau PDF · Maksimal 5 MB</span>
                         </label>
                       `
                       : `
                         <div class="mt-1.5 flex items-center justify-between gap-4 rounded-2xl border border-[#8E1616]/15 bg-[#FEF9F9] p-3">
                           <div class="flex items-center gap-3 min-w-0">
                             ${
-                              rm.refundProof.mimeType.startsWith('image/') && resolveProofPreviewUrl(rm.refundProof)
+                              String(rm.refundProof.mimeType || '').startsWith('image/') && resolveProofPreviewUrl(rm.refundProof)
                                 ? `<img data-proof-thumb data-candidates="${escapeHtml(JSON.stringify(getDriveCandidateUrls(rm.refundProof.dataUrl || rm.refundProof.remoteUrl, rm.refundProof.mimeType)))}" data-candidate-idx="0" src="${escapeHtml(resolveProofPreviewUrl(rm.refundProof))}" alt="Bukti pengembalian ${escapeHtml(rm.refundProof.name)}" referrerpolicy="no-referrer" class="h-11 w-11 shrink-0 rounded-xl border border-[#8E1616]/15 object-cover bg-white" />`
                                 : `<div class="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-[#8E1616]/15 bg-white text-[#8E1616]">${icon('file-text', 'h-5 w-5')}</div>`
                             }
                             <div class="min-w-0">
                               <p class="truncate text-sm font-semibold text-[#3D0C0C]">${escapeHtml(rm.refundProof.name)}</p>
                               <p class="text-xs text-[#8C5E5E] tabular-nums">
-                                ${rm.refundProof.size > 0 ? `${formatFileSize(rm.refundProof.size)} · ` : ''}Siap dikirim
+                                ${rm.refundProof.size > 0 ? `${formatFileSize(rm.refundProof.size)} · ` : ''}${rm.refundProof.mimeType === 'application/pdf' || String(rm.refundProof.name || '').toLowerCase().endsWith('.pdf') ? 'Dokumen PDF · ' : ''}Siap dikirim
                               </p>
                             </div>
                           </div>
-                          <button type="button" id="btn-remove-refund-proof" class="inline-flex items-center gap-1 rounded-full border border-[#8E1616]/20 bg-white px-3 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] hover:text-[#8E1616] cursor-pointer">
-                            ${icon('trash-2', 'h-3.5 w-3.5')}
-                            Ganti
+                          <button type="button" id="btn-remove-refund-proof" aria-label="Ganti atau lepas file ${escapeHtml(rm.refundProof.name)}" class="inline-flex items-center gap-1 rounded-full border border-[#8E1616]/20 bg-white px-3 py-1.5 text-xs font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] hover:text-[#8E1616] cursor-pointer">
+                            ${icon('refresh-cw', 'h-3.5 w-3.5')}
+                            Ganti File
                           </button>
                         </div>
                       `
@@ -3722,13 +4264,13 @@ function doPost(e) {
                   Otomatis ubah status klaim menjadi <strong>Selesai / Ditransfer</strong>
                 </label>
 
-                <div class="flex flex-col-reverse gap-3 border-t border-[#8E1616]/10 pt-4 sm:flex-row sm:justify-end">
+                <div class="flex flex-col-reverse gap-2.5 border-t border-[#8E1616]/10 pt-4 sm:flex-row sm:justify-end">
                   <button type="button" id="btn-cancel-refund" class="rounded-full border border-[#8E1616]/20 bg-white px-5 py-2.5 text-sm font-semibold text-[#3D0C0C] hover:bg-[#FFF0F0] cursor-pointer">
                     Batal
                   </button>
                   <button type="submit" ${rm.isSaving ? 'disabled' : ''} class="inline-flex items-center justify-center gap-2 rounded-full bg-[#8E1616] px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#731111] disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer">
                     ${icon('send', 'h-4 w-4')}
-                    ${rm.isSaving ? 'Menyimpan & Menyiapkan...' : 'Simpan Bukti & Kirim'}
+                    ${rm.isSaving ? 'Menyimpan & Menyiapkan...' : 'Simpan & Kirim ke WhatsApp'}
                   </button>
                 </div>
               </form>
@@ -3838,6 +4380,9 @@ function doPost(e) {
                       <li>
                         Pastikan konstanta <code class="font-mono font-semibold text-[#8E1616]">WEB_APP_URL</code> di bagian atas
                         <code class="font-mono">&lt;script&gt;</code> file <code class="font-mono">index.html</code> berisi URL <code>/exec</code> tersebut.
+                      </li>
+                      <li>
+                        Skrip terbaru otomatis mengunci format kolom waktu (<code>dd/MM/yyyy, HH.mm.ss</code> WIB) dan <code>noPonsel</code> (Teks Polos <code>08...</code>) agar angka 0 tidak hilang dan tidak terjadi error format di Google Sheets. Anda juga dapat menjalankan fungsi <code>perbaikiDanKunciFormatSheet</code> sekali dari editor Apps Script.
                       </li>
                     </ol>
                     ${
@@ -3954,6 +4499,9 @@ function doPost(e) {
               picked,
               picked.buktiTransferPengembalian && picked.buktiTransferPengembalian.name,
               picked.catatanPengembalian,
+              picked.buktiTransferPengembalian &&
+                (picked.buktiTransferPengembalian.remoteUrl ||
+                  picked.buktiTransferPengembalian.dataUrl),
             ),
             sendToGroup: true,
             sendToPhone: false,
@@ -3963,7 +4511,6 @@ function doPost(e) {
             completedRecord: null,
             copiedMsg: false,
             copiedImg: false,
-            copiedShareLink: false,
             copiedDriveLink: false,
             shareFeedback: null,
           };
@@ -4010,7 +4557,10 @@ function doPost(e) {
               const found = state.claims.find((c) => c.ticketNumber === ticket);
               if (found) {
                 state.previewClaim = found;
-                state.previewTab = 'awal';
+                state.previewTab =
+                  !found.buktiTransferSebelumnya && found.buktiTransferPengembalian
+                    ? 'refund'
+                    : 'awal';
                 render();
               }
             });
@@ -4050,6 +4600,143 @@ function doPost(e) {
                 state.updatingTicket = null;
                 render();
               }
+            });
+          });
+        }
+
+        function bindProofViewerFallbacks(scopeEl) {
+          if (!scopeEl) return;
+
+          scopeEl.querySelectorAll('[data-pdf-canvas-stage]').forEach((stageEl) => {
+            void renderPdfDataUrlToCanvasStage(stageEl);
+          });
+
+          scopeEl.querySelectorAll('button[data-action="open-gas-from-preview"]').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              state.previewClaim = null;
+              state.showGasSetup = true;
+              render();
+            });
+          });
+
+          scopeEl.querySelectorAll('[data-proof-missing-url]').forEach((box) => {
+            const ticketId = box.getAttribute('data-ticket') || '';
+            const fileName = box.getAttribute('data-file-name') || '';
+            const proofKind = box.getAttribute('data-proof-kind') || 'awal';
+            if (!isGasConfigured() || (!ticketId && !fileName)) return;
+            const statusEl = box.querySelector('[data-proof-lookup-status]');
+            if (statusEl) {
+              statusEl.textContent = 'Mencari tautan file di Google Drive...';
+            }
+            void fetchGasProofProxy({
+              fileName,
+              ticketId,
+              isRefund: proofKind === 'refund',
+            }).then((res) => {
+              if (!res || (!res.dataUrl && !res.fileUrl)) {
+                if (statusEl) {
+                  statusEl.textContent =
+                    'Data dari Google Sheet hanya mencantumkan nama file tanpa tautan Google Drive langsung. Klik tombol di bawah untuk mencari file di Google Drive atau perbarui skrip Apps Script agar pratinjau termuat otomatis.';
+                }
+                return;
+              }
+              const targetKey =
+                proofKind === 'refund'
+                  ? 'buktiTransferPengembalian'
+                  : 'buktiTransferSebelumnya';
+              const existingClaim = state.claims.find((c) => c.ticketNumber === ticketId) || state.previewClaim;
+              const currentProof =
+                (existingClaim && existingClaim[targetKey]) || {
+                  name: fileName || 'bukti-transfer',
+                };
+              const patched = {
+                ...currentProof,
+                name: res.fileName || currentProof.name,
+                mimeType: res.mimeType || currentProof.mimeType || 'image/png',
+                dataUrl: res.dataUrl || res.fileUrl || '',
+                remoteUrl: res.fileUrl || currentProof.remoteUrl || '',
+                driveFileId: res.fileId || currentProof.driveFileId || '',
+              };
+              state.claims = state.claims.map((c) =>
+                c.ticketNumber === ticketId ? { ...c, [targetKey]: patched } : c,
+              );
+              if (state.previewClaim && state.previewClaim.ticketNumber === ticketId) {
+                state.previewClaim = { ...state.previewClaim, [targetKey]: patched };
+                render();
+              }
+            });
+          });
+
+          scopeEl.querySelectorAll('img[data-proof-img]').forEach((img) => {
+            const stage = img.closest('[data-proof-stage]');
+            const iframeBox = stage ? stage.querySelector('[data-proof-iframe-box]') : null;
+            const iframe = stage ? stage.querySelector('iframe[data-proof-iframe]') : null;
+            const errorBox = stage ? stage.querySelector('[data-proof-error-box]') : null;
+            const driveId = stage ? stage.getAttribute('data-drive-id') || '' : '';
+            const fileName = stage ? stage.getAttribute('data-file-name') || '' : '';
+            const ticketId = stage ? stage.getAttribute('data-ticket') || '' : '';
+            const proofKind = stage ? stage.getAttribute('data-proof-kind') || 'awal' : 'awal';
+
+            const showIframeOrError = () => {
+              img.classList.add('hidden');
+              const iframeSrc = iframe ? iframe.getAttribute('data-src') : '';
+              if (iframeBox && iframe && iframeSrc) {
+                if (!iframe.getAttribute('src')) {
+                  iframe.setAttribute('src', iframeSrc);
+                }
+                iframeBox.classList.remove('hidden');
+              } else if (errorBox) {
+                errorBox.classList.remove('hidden');
+                errorBox.classList.add('flex');
+              }
+            };
+
+            img.addEventListener('error', async () => {
+              let candidates = [];
+              try {
+                candidates = JSON.parse(img.getAttribute('data-candidates') || '[]');
+              } catch {
+                candidates = [];
+              }
+              const currentIdx = Number(img.getAttribute('data-candidate-idx') || '0');
+              const nextIdx = currentIdx + 1;
+              if (nextIdx < candidates.length) {
+                img.setAttribute('data-candidate-idx', String(nextIdx));
+                img.src = candidates[nextIdx];
+                return;
+              }
+
+              if (!img.dataset.proxyTried && isGasConfigured() && (driveId || fileName || ticketId)) {
+                img.dataset.proxyTried = '1';
+                const proxyRes = await fetchGasProofProxy({
+                  id: driveId,
+                  fileName,
+                  ticketId,
+                  isRefund: proofKind === 'refund',
+                });
+                if (proxyRes && proxyRes.dataUrl) {
+                  img.src = proxyRes.dataUrl;
+                  const targetKey =
+                    proofKind === 'refund'
+                      ? 'buktiTransferPengembalian'
+                      : 'buktiTransferSebelumnya';
+                  state.claims = state.claims.map((c) =>
+                    c.ticketNumber === ticketId && c[targetKey]
+                      ? { ...c, [targetKey]: { ...c[targetKey], dataUrl: proxyRes.dataUrl } }
+                      : c,
+                  );
+                  if (
+                    state.previewClaim &&
+                    state.previewClaim.ticketNumber === ticketId &&
+                    state.previewClaim[targetKey]
+                  ) {
+                    state.previewClaim[targetKey].dataUrl = proxyRes.dataUrl;
+                  }
+                  return;
+                }
+              }
+
+              showIframeOrError();
             });
           });
         }
@@ -4111,7 +4798,17 @@ function doPost(e) {
 
             bindText('field-namaSiswa', 'namaSiswa');
             bindText('field-nomorRegistrasi', 'nomorRegistrasi');
-            bindText('field-nomorPonsel', 'nomorPonsel');
+            bindText('field-nomorPonsel', 'nomorPonsel', (v) => v.replace(/[^0-9+\-\s]/g, ''));
+            const phoneFieldEl = document.getElementById('field-nomorPonsel');
+            if (phoneFieldEl) {
+              phoneFieldEl.addEventListener('blur', (ev) => {
+                const normalized = formatLocalPhoneNumber(ev.target.value);
+                if (normalized && ev.target.value !== normalized) {
+                  ev.target.value = normalized;
+                  state.form.nomorPonsel = normalized;
+                }
+              });
+            }
             bindText('field-programKursus', 'programKursus');
             bindText('field-periode', 'periode');
             bindText('field-nomorRekening', 'nomorRekening', (v) => v.replace(/[^0-9]/g, ''));
@@ -4476,120 +5173,7 @@ function doPost(e) {
                 render();
               });
             }
-            document.querySelectorAll('button[data-preview-tab]').forEach((btn) => {
-              btn.addEventListener('click', () => {
-                state.previewTab = btn.getAttribute('data-preview-tab') || 'awal';
-                render();
-              });
-            });
-            document.querySelectorAll('button[data-action="open-gas-from-preview"]').forEach((btn) => {
-              btn.addEventListener('click', () => {
-                state.previewClaim = null;
-                state.showGasSetup = true;
-                render();
-              });
-            });
-
-            // Jika baris dari Sheet lama hanya memiliki nama file tanpa URL, coba resolve otomatis via Apps Script (bila sudah diperbarui)
-            document.querySelectorAll('[data-proof-missing-url]').forEach((box) => {
-              const ticketId = box.getAttribute('data-ticket') || '';
-              const fileName = box.getAttribute('data-file-name') || '';
-              if (!isGasConfigured() || (!ticketId && !fileName)) return;
-              const statusEl = box.querySelector('[data-proof-lookup-status]');
-              if (statusEl) {
-                statusEl.textContent = 'Mencari tautan file di Google Drive...';
-              }
-              void fetchGasProofProxy({ fileName, ticketId }).then((res) => {
-                if (!res || (!res.dataUrl && !res.fileUrl)) {
-                  if (statusEl) {
-                    statusEl.textContent =
-                      'Data dari Google Sheet hanya mencantumkan nama file tanpa tautan Google Drive langsung. Klik tombol di bawah untuk mencari file di Google Drive atau perbarui skrip Apps Script agar pratinjau termuat otomatis.';
-                  }
-                  return;
-                }
-                if (state.previewClaim && state.previewClaim.ticketNumber === ticketId) {
-                  const targetKey =
-                    state.previewTab === 'refund' && state.previewClaim.buktiTransferPengembalian
-                      ? 'buktiTransferPengembalian'
-                      : 'buktiTransferSebelumnya';
-                  const currentProof = state.previewClaim[targetKey] || { name: fileName || 'bukti-transfer' };
-                  const patched = {
-                    ...currentProof,
-                    name: res.fileName || currentProof.name,
-                    mimeType: res.mimeType || currentProof.mimeType || 'image/png',
-                    dataUrl: res.dataUrl || res.fileUrl || '',
-                    remoteUrl: res.fileUrl || currentProof.remoteUrl || '',
-                    driveFileId: res.fileId || currentProof.driveFileId || '',
-                  };
-                  state.previewClaim = { ...state.previewClaim, [targetKey]: patched };
-                  state.claims = state.claims.map((c) =>
-                    c.ticketNumber === ticketId ? { ...c, [targetKey]: patched } : c,
-                  );
-                  render();
-                }
-              });
-            });
-
-            // Fallback berlapis untuk gambar Google Drive: lh3 -> thumbnail -> uc -> GAS proxy -> iframe Drive /preview
-            document.querySelectorAll('img[data-proof-img]').forEach((img) => {
-              const stage = img.closest('[data-proof-stage]');
-              const iframeBox = stage ? stage.querySelector('[data-proof-iframe-box]') : null;
-              const iframe = stage ? stage.querySelector('iframe[data-proof-iframe]') : null;
-              const errorBox = stage ? stage.querySelector('[data-proof-error-box]') : null;
-              const driveId = stage ? stage.getAttribute('data-drive-id') || '' : '';
-              const fileName = stage ? stage.getAttribute('data-file-name') || '' : '';
-              const ticketId = stage ? stage.getAttribute('data-ticket') || '' : '';
-
-              const showIframeOrError = () => {
-                img.classList.add('hidden');
-                const iframeSrc = iframe ? iframe.getAttribute('data-src') : '';
-                if (iframeBox && iframe && iframeSrc) {
-                  if (!iframe.getAttribute('src')) {
-                    iframe.setAttribute('src', iframeSrc);
-                  }
-                  iframeBox.classList.remove('hidden');
-                } else if (errorBox) {
-                  errorBox.classList.remove('hidden');
-                  errorBox.classList.add('flex');
-                }
-              };
-
-              img.addEventListener('error', async () => {
-                let candidates = [];
-                try {
-                  candidates = JSON.parse(img.getAttribute('data-candidates') || '[]');
-                } catch {
-                  candidates = [];
-                }
-                const currentIdx = Number(img.getAttribute('data-candidate-idx') || '0');
-                const nextIdx = currentIdx + 1;
-                if (nextIdx < candidates.length) {
-                  img.setAttribute('data-candidate-idx', String(nextIdx));
-                  img.src = candidates[nextIdx];
-                  return;
-                }
-
-                if (!img.dataset.proxyTried && isGasConfigured() && (driveId || fileName || ticketId)) {
-                  img.dataset.proxyTried = '1';
-                  const proxyRes = await fetchGasProofProxy({ id: driveId, fileName, ticketId });
-                  if (proxyRes && proxyRes.dataUrl) {
-                    img.src = proxyRes.dataUrl;
-                    if (state.previewClaim && state.previewClaim.ticketNumber === ticketId) {
-                      const targetKey =
-                        state.previewTab === 'refund' && state.previewClaim.buktiTransferPengembalian
-                          ? 'buktiTransferPengembalian'
-                          : 'buktiTransferSebelumnya';
-                      if (state.previewClaim[targetKey]) {
-                        state.previewClaim[targetKey].dataUrl = proxyRes.dataUrl;
-                      }
-                    }
-                    return;
-                  }
-                }
-
-                showIframeOrError();
-              });
-            });
+            bindProofViewerFallbacks(document);
           }
 
           document.querySelectorAll('img[data-proof-thumb]').forEach((img) => {
@@ -4641,6 +5225,9 @@ function doPost(e) {
                     nextClaim,
                     nextClaim.buktiTransferPengembalian && nextClaim.buktiTransferPengembalian.name,
                     nextClaim.catatanPengembalian,
+                    nextClaim.buktiTransferPengembalian &&
+                      (nextClaim.buktiTransferPengembalian.remoteUrl ||
+                        nextClaim.buktiTransferPengembalian.dataUrl),
                   );
                   rm.completedRecord = null;
                   rm.error = null;
@@ -4656,8 +5243,8 @@ function doPost(e) {
                 const file = ev.target.files && ev.target.files[0];
                 if (!file) return;
 
-                if (!isAllowedProofImageFile(file)) {
-                  rm.error = 'Format file hanya boleh gambar/foto (JPG, PNG, WEBP), bukan file PDF.';
+                if (!isAllowedRefundProofFile(file)) {
+                  rm.error = 'Format berkas tidak didukung. Gunakan gambar/foto (JPG, PNG, WEBP) atau PDF.';
                   ev.target.value = '';
                   render();
                   return;
@@ -4672,7 +5259,12 @@ function doPost(e) {
                 try {
                   const payload = await fileToProofPayload(file);
                   rm.refundProof = payload;
-                  rm.message = buildWhatsAppRefundMessage(currentClaim, payload.name, rm.note);
+                  rm.message = buildWhatsAppRefundMessage(
+                    currentClaim,
+                    payload.name,
+                    rm.note,
+                    payload.remoteUrl,
+                  );
                   rm.error = null;
                 } catch (err) {
                   rm.error = err instanceof Error ? err.message : 'Gagal membaca berkas.';
@@ -4685,6 +5277,7 @@ function doPost(e) {
             if (removeRefundProofBtn) {
               removeRefundProofBtn.addEventListener('click', () => {
                 rm.refundProof = null;
+                rm.message = buildWhatsAppRefundMessage(currentClaim, '', rm.note, '');
                 render();
               });
             }
@@ -4717,6 +5310,7 @@ function doPost(e) {
                   currentClaim,
                   rm.refundProof && rm.refundProof.name,
                   rm.note,
+                  rm.refundProof && (rm.refundProof.remoteUrl || rm.refundProof.dataUrl),
                 );
                 if (msgTextarea) {
                   msgTextarea.value = rm.message;
@@ -4734,7 +5328,7 @@ function doPost(e) {
               refundForm.addEventListener('submit', async (ev) => {
                 ev.preventDefault();
                 if (!rm.refundProof) {
-                  rm.error = 'Unggah bukti transfer pengembalian terlebih dahulu.';
+                  rm.error = 'Unggah foto, gambar, atau file PDF bukti transfer pengembalian terlebih dahulu.';
                   render();
                   return;
                 }
@@ -4776,16 +5370,11 @@ function doPost(e) {
                   if (updated.buktiTransferPengembalian) {
                     rm.refundProof = updated.buktiTransferPengembalian;
                   }
-                  if (rm.sendToGroup && navigator.clipboard && navigator.clipboard.writeText) {
-                    try {
-                      await navigator.clipboard.writeText(nextMsg);
-                      rm.copiedMsg = true;
-                      rm.shareFeedback =
-                        'Teks rincian klaim disalin ke clipboard. Siap ditempel (Ctrl+V) di Grup WhatsApp.';
-                    } catch {
-                      // Abaikan
-                    }
-                  }
+                  const autoCopied = await copyTextToClipboardSafe(nextMsg);
+                  rm.copiedMsg = autoCopied;
+                  rm.shareFeedback = autoCopied
+                    ? 'Bukti tersimpan & pesan beserta tautan bukti otomatis disalin ke clipboard. Tinggal buka WhatsApp lalu tempel (Ctrl+V) atau klik Kirim via WhatsApp.'
+                    : 'Bukti tersimpan & tautan bukti sudah disertakan dalam pesan. Klik Salin Rincian atau Kirim via WhatsApp di atas.';
                 } catch (err) {
                   rm.error =
                     err instanceof Error
@@ -4813,29 +5402,6 @@ function doPost(e) {
                   setTimeout(() => {
                     if (state.refundModal && state.refundModal.copiedMsg) {
                       state.refundModal.copiedMsg = false;
-                      render();
-                    }
-                  }, 2500);
-                } catch {
-                  // Abaikan
-                }
-              });
-            }
-
-            const copyShareLinkBtn = document.getElementById('btn-copy-wa-share-link');
-            if (copyShareLinkBtn) {
-              copyShareLinkBtn.addEventListener('click', async () => {
-                const textToCopy =
-                  (rm.completedRecord && rm.completedRecord.pesanNotifikasiTerkirim) || rm.message;
-                try {
-                  await navigator.clipboard.writeText(buildWhatsAppShareTextUrl(textToCopy));
-                  rm.copiedShareLink = true;
-                  rm.shareFeedback =
-                    'Link pesan WA (wa.me/?text=...) disalin. Saat dibuka, rincian klaim langsung terisi otomatis.';
-                  render();
-                  setTimeout(() => {
-                    if (state.refundModal && state.refundModal.copiedShareLink) {
-                      state.refundModal.copiedShareLink = false;
                       render();
                     }
                   }, 2500);
@@ -4928,6 +5494,7 @@ function doPost(e) {
                 }
               });
             }
+
           }
 
           const dismissNoticeBtn = document.getElementById('btn-dismiss-action-notice');
